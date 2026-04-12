@@ -1,0 +1,78 @@
+/* AshiChat TUI Stylesheet — Pure Black, ASCII-safe */
+
+Screen {
+    background: #000000;
+    color: #ffffff;
+}
+
+Header {
+    background: #000000;
+    color: #ffffff;
+}
+
+Footer {
+    background: #000000;
+    color: #aaaaaa;
+}
+
+/* Sidebar */
+Sidebar {
+    width: 28;
+    dock: left;
+    background: #000000;
+    border: none;
+    padding: 1;
+}
+
+.sidebar-title {
+    text-style: bold;
+    color: #ffffff;
+    padding-bottom: 1;
+}
+
+#contact-list {
+    background: #000000;
+    border: none;
+}
+
+#contact-list > ListItem {
+    padding: 0 1;
+    height: 1;
+}
+
+#contact-list > ListItem:hover {
+    background: #222222;
+}
+
+/* Chat view */
+ChatView {
+    background: #000000;
+    padding: 1;
+    border: none;
+}
+
+#message-container {
+    background: #000000;
+    padding: 0 1;
+    border: none;
+    scrollbar-color: #333333;
+    scrollbar-color-hover: #555555;
+}
+
+/* Message input */
+MessageInput {
+    dock: bottom;
+    height: 3;
+    padding: 0 1;
+    background: #000000;
+}
+
+#msg-input {
+    background: #000000;
+    color: #ffffff;
+    border: none;
+}
+
+#msg-input:focus {
+    border: none;
+}
