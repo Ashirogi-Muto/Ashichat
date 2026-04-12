@@ -110,6 +110,14 @@ class QueueManager:
         entry = self._queue.get(message_id)
         return entry["status"] if entry else None
 
+    def undelivered_count(self) -> int:
+        """Count messages that have not reached DELIVERED/ACKNOWLEDGED."""
+        return sum(
+            1
+            for entry in self._queue.values()
+            if entry["status"] in {MessageStatus.QUEUED, MessageStatus.PENDING}
+        )
+
     @staticmethod
     def decrypt_data_packet(
         data_payload: DataPayload, session: Session

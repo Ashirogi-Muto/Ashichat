@@ -33,6 +33,7 @@ class PeerRecord:
     version_counter: int
     last_seen: float | None
     nickname: str | None
+    archived: bool = False
 
 
 @dataclass
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS peers (
     last_known_endpoint TEXT,
     version_counter INTEGER DEFAULT 0,
     last_seen REAL,
-    nickname TEXT
+    nickname TEXT,
+    archived INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS message_queue (
@@ -108,6 +110,13 @@ class StorageManager:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(db_path))
         await self._db.executescript(_SCHEMA)
+        # Lightweight migration for existing DBs created before `archived` column.
+        async with self._db.execute("PRAGMA table_info(peers)") as cur:
+            cols = [row[1] async for row in cur]
+        if "archived" not in cols:
+            await self._db.execute(
+                "ALTER TABLE peers ADD COLUMN archived INTEGER DEFAULT 0"
+            )
         await self._db.commit()
         log.info("Storage initialized at %s", db_path)
 
@@ -163,6 +172,26 @@ class StorageManager:
             "UPDATE peers SET last_seen = ? WHERE peer_id = ?",
             (time.time(), peer_id),
         )
+        await self._db.commit()
+
+    async def update_peer_nickname(self, peer_id: bytes, nickname: str | None) -> None:
+        await self._db.execute(
+            "UPDATE peers SET nickname = ? WHERE peer_id = ?",
+            (nickname, peer_id),
+        )
+        await self._db.commit()
+
+    async def set_peer_archived(self, peer_id: bytes, archived: bool) -> None:
+        await self._db.execute(
+            "UPDATE peers SET archived = ? WHERE peer_id = ?",
+            (1 if archived else 0, peer_id),
+        )
+        await self._db.commit()
+
+    async def remove_peer(self, peer_id: bytes) -> None:
+        await self._db.execute("DELETE FROM sessions WHERE peer_id = ?", (peer_id,))
+        await self._db.execute("DELETE FROM message_queue WHERE receiver = ?", (peer_id,))
+        await self._db.execute("DELETE FROM peers WHERE peer_id = ?", (peer_id,))
         await self._db.commit()
 
     # -- Queue operations ----------------------------------------------------
@@ -350,6 +379,7 @@ def _row_to_peer(row: Any) -> PeerRecord:
         version_counter=row[3],
         last_seen=row[4],
         nickname=row[5],
+        archived=bool(row[6]) if len(row) > 6 else False,
     )
 
 

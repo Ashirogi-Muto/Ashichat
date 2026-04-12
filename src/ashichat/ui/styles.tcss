@@ -31,6 +31,13 @@ Sidebar {
     padding-bottom: 1;
 }
 
+#contact-search {
+    background: #0a0a0a;
+    color: #dddddd;
+    border: solid #222222;
+    margin-bottom: 1;
+}
+
 #contact-list {
     background: #000000;
     border: none;
@@ -58,6 +65,24 @@ ChatView {
     border: none;
     scrollbar-color: #333333;
     scrollbar-color-hover: #555555;
+}
+
+.msg-header {
+    color: #bbbbbb;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+.msg-incoming {
+    color: #dcdcdc;
+}
+
+.msg-outgoing {
+    color: #8fd7ff;
+}
+
+.msg-system {
+    color: #8f8f8f;
 }
 
 /* Message input */

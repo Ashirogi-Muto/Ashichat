@@ -116,6 +116,8 @@ class Node:
                 p.peer_id, p.public_key, p.nickname,
                 _parse_endpoint(p.last_known_endpoint) if p.last_known_endpoint else None,
             )
+            if p.archived:
+                await self.peer_states.update_state(p.peer_id, PeerState.ARCHIVED)
 
         # 4. Overlay
         self.overlay = OverlayManager(
@@ -320,6 +322,42 @@ class Node:
             self._send_to(pkt, endpoint)
 
         return msg_id
+
+    async def rename_peer(self, peer_id: bytes, nickname: str) -> None:
+        nickname = nickname.strip()
+        if not nickname:
+            raise ValueError("nickname cannot be empty")
+        await self.storage.update_peer_nickname(peer_id, nickname)
+        entry = self.peer_table.get_entry(peer_id) if self.peer_table else None
+        if entry:
+            entry.nickname = nickname
+
+    async def set_peer_archived(self, peer_id: bytes, archived: bool) -> None:
+        await self.storage.set_peer_archived(peer_id, archived)
+        target = PeerState.ARCHIVED if archived else PeerState.DISCONNECTED
+        current = self.peer_states.get_state(peer_id)
+        if current == target:
+            return
+        try:
+            await self.peer_states.update_state(peer_id, target)
+        except ValueError:
+            if archived and current != PeerState.DISCONNECTED:
+                await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
+                await self.peer_states.update_state(peer_id, PeerState.ARCHIVED)
+            elif not archived and current == PeerState.ARCHIVED:
+                await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
+
+    async def remove_peer(self, peer_id: bytes) -> None:
+        await self.storage.remove_peer(peer_id)
+        if self.peer_table:
+            self.peer_table.remove_peer(peer_id)
+        session = self.session_registry.get_by_peer_id(peer_id)
+        if session is not None:
+            self.session_registry.remove(session.session_id)
+
+    async def get_known_peers(self):
+        """Return current peers from persistent storage."""
+        return await self.storage.get_all_peers()
 
     # -- Internal helpers ----------------------------------------------------
 
