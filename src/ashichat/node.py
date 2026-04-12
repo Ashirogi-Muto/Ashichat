@@ -7,6 +7,7 @@ heartbeat, peer state, overlay, resolution, rate limiting, NAT, and queue.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -39,10 +40,18 @@ from ashichat.storage import MessageLog, StorageManager
 from ashichat.transport_udp import UDPTransport, start_udp_listener
 from ashichat.handshake import create_hello, process_hello_ack
 from ashichat.identity import derive_peer_id
+from ashichat.invite import parse_invite
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 log = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ContactAddResult:
+    peer_id: bytes
+    endpoint: tuple[str, int] | None
+    connection_started: bool
 
 
 class Node:
@@ -69,6 +78,7 @@ class Node:
         # Event callbacks for UI
         self._on_message_received: list[Callable] = []
         self._on_peer_state_changed: list[Callable] = []
+        self._on_peers_changed: list[Callable[[], None]] = []
 
         self._transport_obj: asyncio.DatagramTransport | None = None
         self._running = False
@@ -84,6 +94,9 @@ class Node:
         self.peer_states.on_state_change(
             lambda pid, old, new: callback(pid, old, new)
         )
+
+    def on_peers_changed(self, callback: Callable[[], None]) -> None:
+        self._on_peers_changed.append(callback)
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -225,15 +238,26 @@ class Node:
         # Auto-trust peers that can complete a valid invite-derived handshake.
         # This enables reciprocal contact creation on first connect.
         if remote_peer_id not in self.peer_table.get_direct_peer_ids():
-            nickname = remote_peer_id.hex()[:8]
-            await self.storage.add_peer(remote_peer_id, hello.identity_public_key, nickname)
+            await self.storage.add_peer(
+                remote_peer_id,
+                hello.identity_public_key,
+                endpoint=addr,
+            )
+            saved = await self.storage.get_peer(remote_peer_id)
             self.peer_table.add_direct_peer(
                 remote_peer_id,
                 hello.identity_public_key,
-                nickname=nickname,
+                nickname=saved.nickname if saved is not None else None,
                 endpoint=addr,
             )
-            log.info("Auto-added new peer from HELLO: %s", nickname)
+            self._notify_peers_changed()
+            log.info("Auto-added new peer from HELLO: %s", remote_peer_id.hex()[:8])
+        else:
+            entry = self.peer_table.get_entry(remote_peer_id)
+            if entry is not None:
+                entry.endpoint = addr
+
+        await self.storage.remember_endpoint(remote_peer_id, addr)
 
         known = self.peer_table.get_direct_peer_ids()
         result = process_hello(packet, known, self.identity)
@@ -254,7 +278,7 @@ class Node:
             session.session_id, session.remote_peer_id,
             session.send_sequence, session.recv_sequence,
         )
-        await self.peer_states.update_state(keys.remote_peer_id, PeerState.CONNECTED)
+        await self._mark_peer_connected(keys.remote_peer_id)
         self.heartbeat.register_peer(keys.remote_peer_id, keys.session_id, addr)
         await self.heartbeat.start_heartbeat(keys.remote_peer_id)
         await self._flush_queued_for_peer(keys.remote_peer_id)
@@ -282,7 +306,8 @@ class Node:
             session.send_sequence,
             session.recv_sequence,
         )
-        await self.peer_states.update_state(keys.remote_peer_id, PeerState.CONNECTED)
+        await self._mark_peer_connected(keys.remote_peer_id)
+        await self.storage.remember_endpoint(keys.remote_peer_id, addr)
         if self.peer_table:
             entry = self.peer_table.get_entry(keys.remote_peer_id)
             if entry:
@@ -311,6 +336,11 @@ class Node:
 
         # Persist to message log
         await self.message_log.append_message(session.remote_peer_id, dp.ciphertext + dp.auth_tag)
+        await self.storage.remember_endpoint(session.remote_peer_id, addr)
+        if self.peer_table:
+            entry = self.peer_table.get_entry(session.remote_peer_id)
+            if entry is not None:
+                entry.endpoint = addr
 
         # Notify UI
         for cb in self._on_message_received:
@@ -377,6 +407,51 @@ class Node:
 
         return msg_id
 
+    async def add_contact_from_invite(self, invite_code: str) -> ContactAddResult:
+        """Parse an invite, persist the peer, and start a connection if possible."""
+        if self.identity is None or self.peer_table is None:
+            raise RuntimeError("node not running")
+
+        data = parse_invite(invite_code)
+        pub_raw = data.public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+        peer_id = derive_peer_id(Ed25519PublicKey.from_public_bytes(pub_raw))
+        if peer_id == self.identity.peer_id:
+            raise ValueError("cannot add your own invite")
+
+        await self.storage.add_peer(peer_id, pub_raw, endpoint=data.endpoint)
+        saved = await self.storage.get_peer(peer_id)
+        if saved is None:
+            raise RuntimeError("peer insert verification failed")
+
+        entry = self.peer_table.get_entry(peer_id)
+        if entry is None:
+            self.peer_table.add_direct_peer(
+                peer_id,
+                pub_raw,
+                nickname=saved.nickname,
+                endpoint=data.endpoint or _parse_endpoint(saved.last_known_endpoint),
+            )
+        else:
+            entry.is_direct = True
+            entry.public_key = pub_raw
+            if saved.nickname is not None:
+                entry.nickname = saved.nickname
+            if data.endpoint is not None:
+                entry.endpoint = data.endpoint
+
+        self._notify_peers_changed()
+
+        connection_started = False
+        if data.endpoint is not None:
+            await self.connect_to_peer(peer_id, data.endpoint)
+            connection_started = True
+
+        return ContactAddResult(
+            peer_id=peer_id,
+            endpoint=data.endpoint,
+            connection_started=connection_started,
+        )
+
     async def connect_to_peer(self, peer_id: bytes, endpoint: tuple[str, int]) -> None:
         """Initiate HELLO to peer endpoint."""
         if self.identity is None or self.transport is None:
@@ -387,6 +462,7 @@ class Node:
         hello_pkt, state = create_hello(self.identity)
         state.target_peer_id = peer_id
         self._pending_hello_by_addr[endpoint] = state
+        await self.storage.remember_endpoint(peer_id, endpoint)
         if self.peer_table:
             entry = self.peer_table.get_entry(peer_id)
             if entry:
@@ -422,12 +498,14 @@ class Node:
         entry = self.peer_table.get_entry(peer_id) if self.peer_table else None
         if entry:
             entry.nickname = nickname
+        self._notify_peers_changed()
 
     async def set_peer_archived(self, peer_id: bytes, archived: bool) -> None:
         await self.storage.set_peer_archived(peer_id, archived)
         target = PeerState.ARCHIVED if archived else PeerState.DISCONNECTED
         current = self.peer_states.get_state(peer_id)
         if current == target:
+            self._notify_peers_changed()
             return
         try:
             await self.peer_states.update_state(peer_id, target)
@@ -437,6 +515,7 @@ class Node:
                 await self.peer_states.update_state(peer_id, PeerState.ARCHIVED)
             elif not archived and current == PeerState.ARCHIVED:
                 await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
+        self._notify_peers_changed()
 
     async def remove_peer(self, peer_id: bytes) -> None:
         await self.storage.remove_peer(peer_id)
@@ -445,6 +524,7 @@ class Node:
         session = self.session_registry.get_by_peer_id(peer_id)
         if session is not None:
             self.session_registry.remove(session.session_id)
+        self._notify_peers_changed()
 
     async def get_known_peers(self):
         """Return current peers from persistent storage."""
@@ -455,6 +535,28 @@ class Node:
     def _send_to(self, packet: Packet, addr: tuple[str, int]) -> None:
         if self.transport:
             self.transport.send_packet(packet, addr)
+
+    def _notify_peers_changed(self) -> None:
+        for cb in self._on_peers_changed:
+            try:
+                cb()
+            except Exception:
+                log.exception("Peer list callback error")
+
+    async def _mark_peer_connected(self, peer_id: bytes) -> None:
+        current = self.peer_states.get_state(peer_id)
+        if current == PeerState.CONNECTED:
+            return
+        if current == PeerState.DISCONNECTED:
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+        elif current == PeerState.ARCHIVED:
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+        elif current == PeerState.RESOLVING:
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+        elif current == PeerState.FAILED:
+            await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+        await self.peer_states.update_state(peer_id, PeerState.CONNECTED)
 
 
 def _parse_endpoint(ep: str) -> tuple[str, int] | None:

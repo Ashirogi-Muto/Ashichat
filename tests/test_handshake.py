@@ -50,6 +50,7 @@ class TestHandshakeFlow:
 
         # CRITICAL INVARIANT: both sides derive the same encryption key
         assert alice_keys.encryption_key == bob_keys.encryption_key
+        assert alice_keys.session_id == bob_keys.session_id
 
     def test_both_know_each_other(self) -> None:
         alice, bob, alice_known, bob_known = self._setup_peers()
@@ -61,6 +62,7 @@ class TestHandshakeFlow:
         assert alice_keys is not None
         assert alice_keys.remote_peer_id == bob.peer_id
         assert bob_keys.remote_peer_id == alice.peer_id
+        assert alice_keys.session_id == bob_keys.session_id
 
     def test_unknown_peer_rejected_hello(self) -> None:
         alice, bob, _, _ = self._setup_peers()

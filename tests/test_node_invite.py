@@ -206,3 +206,72 @@ class TestNode:
         assert rec.send_sequence == 42
         assert rec.recv_sequence == 10
         await sm.close()
+
+    async def test_add_contact_from_invite_persists_peer_and_endpoint(self, tmp_path: Path) -> None:
+        alice_dir = tmp_path / "alice"
+        bob_dir = tmp_path / "bob"
+        alice = Node(self._make_config(alice_dir, port=0))
+        bob = Node(self._make_config(bob_dir, port=0))
+
+        await alice.start()
+        await bob.start()
+        try:
+            bob_port = bob.transport._transport.get_extra_info("sockname")[1]
+            invite = generate_invite(bob.identity.public_key, endpoint=("127.0.0.1", bob_port))
+
+            result = await alice.add_contact_from_invite(invite)
+            known = await alice.get_known_peers()
+
+            assert result.peer_id == bob.identity.peer_id
+            assert result.connection_started is True
+            assert len(known) == 1
+            assert known[0].peer_id == bob.identity.peer_id
+            assert known[0].last_known_endpoint == f"127.0.0.1:{bob_port}"
+        finally:
+            await alice.stop()
+            await bob.stop()
+
+    async def test_accept_invite_bootstraps_both_sides_and_delivers_first_message(
+        self, tmp_path: Path
+    ) -> None:
+        alice_dir = tmp_path / "alice"
+        bob_dir = tmp_path / "bob"
+        alice = Node(self._make_config(alice_dir, port=0))
+        bob = Node(self._make_config(bob_dir, port=0))
+
+        received: list[tuple[bytes, bytes]] = []
+        bob.on_message_received(lambda peer_id, plaintext: received.append((peer_id, plaintext)))
+
+        await alice.start()
+        await bob.start()
+        try:
+            bob_port = bob.transport._transport.get_extra_info("sockname")[1]
+            invite = generate_invite(bob.identity.public_key, endpoint=("127.0.0.1", bob_port))
+
+            await alice.add_contact_from_invite(invite)
+            await _wait_for(
+                lambda: (
+                    alice.session_registry.get_by_peer_id(bob.identity.peer_id) is not None
+                    and bob.session_registry.get_by_peer_id(alice.identity.peer_id) is not None
+                )
+            )
+
+            bob_known = await bob.get_known_peers()
+            assert any(peer.peer_id == alice.identity.peer_id for peer in bob_known)
+
+            await alice.send_message(bob.identity.peer_id, "hello from alice")
+            await _wait_for(lambda: len(received) == 1)
+
+            assert received == [(alice.identity.peer_id, b"hello from alice")]
+        finally:
+            await alice.stop()
+            await bob.stop()
+
+
+async def _wait_for(predicate, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met before timeout")

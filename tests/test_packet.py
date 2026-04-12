@@ -86,11 +86,13 @@ class TestHelloAckPayload:
         orig = HelloAckPayload(
             identity_public_key=os.urandom(32),
             ephemeral_public_key=os.urandom(32),
+            session_id=os.urandom(8),
             random_nonce=os.urandom(16),
             signature=os.urandom(64),
         )
         parsed = HelloAckPayload.deserialize(orig.serialize())
         assert parsed.identity_public_key == orig.identity_public_key
+        assert parsed.session_id == orig.session_id
         assert parsed.signature == orig.signature
 
 

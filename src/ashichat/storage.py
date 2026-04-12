@@ -128,12 +128,22 @@ class StorageManager:
     # -- Peer operations -----------------------------------------------------
 
     async def add_peer(
-        self, peer_id: bytes, public_key: bytes, nickname: str | None = None
+        self,
+        peer_id: bytes,
+        public_key: bytes,
+        nickname: str | None = None,
+        endpoint: tuple[str, int] | str | None = None,
     ) -> None:
+        endpoint_text = _format_endpoint(endpoint)
         await self._db.execute(
-            "INSERT OR REPLACE INTO peers (peer_id, public_key, nickname, version_counter, last_seen) "
-            "VALUES (?, ?, ?, 0, ?)",
-            (peer_id, public_key, nickname, time.time()),
+            "INSERT INTO peers (peer_id, public_key, last_known_endpoint, nickname, version_counter, last_seen, archived) "
+            "VALUES (?, ?, ?, ?, 0, ?, 0) "
+            "ON CONFLICT(peer_id) DO UPDATE SET "
+            "public_key = excluded.public_key, "
+            "last_known_endpoint = COALESCE(excluded.last_known_endpoint, peers.last_known_endpoint), "
+            "nickname = COALESCE(excluded.nickname, peers.nickname), "
+            "last_seen = excluded.last_seen",
+            (peer_id, public_key, endpoint_text, nickname, time.time()),
         )
         await self._db.commit()
 
@@ -166,6 +176,18 @@ class StorageManager:
         )
         await self._db.commit()
         return True
+
+    async def remember_endpoint(
+        self,
+        peer_id: bytes,
+        endpoint: tuple[str, int] | str,
+    ) -> None:
+        """Persist the latest authenticated endpoint observation."""
+        await self._db.execute(
+            "UPDATE peers SET last_known_endpoint = ?, last_seen = ? WHERE peer_id = ?",
+            (_format_endpoint(endpoint), time.time(), peer_id),
+        )
+        await self._db.commit()
 
     async def update_last_seen(self, peer_id: bytes) -> None:
         await self._db.execute(
@@ -381,6 +403,15 @@ def _row_to_peer(row: Any) -> PeerRecord:
         nickname=row[5],
         archived=bool(row[6]) if len(row) > 6 else False,
     )
+
+
+def _format_endpoint(endpoint: tuple[str, int] | str | None) -> str | None:
+    if endpoint is None:
+        return None
+    if isinstance(endpoint, str):
+        return endpoint
+    host, port = endpoint
+    return f"{host}:{port}"
 
 
 def _row_to_queue(row: Any) -> QueueRecord:

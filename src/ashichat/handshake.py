@@ -125,8 +125,13 @@ def process_hello_ack(
         log.warning("HELLO_ACK from unknown peer %s — rejected", remote_peer_id.hex()[:8])
         return None
 
-    # 2. Verify signature: sign(identity_private, receiver_eph || initiator_eph || initiator_nonce)
-    signed_data = ack.ephemeral_public_key + state.ephemeral_public_key_bytes + state.local_nonce
+    # 2. Verify signature: sign(identity_private, session_id || receiver_eph || initiator_eph || initiator_nonce)
+    signed_data = (
+        ack.session_id
+        + ack.ephemeral_public_key
+        + state.ephemeral_public_key_bytes
+        + state.local_nonce
+    )
     if not verify_signature(remote_pubkey, signed_data, ack.signature):
         log.warning("Invalid HELLO_ACK signature from %s", remote_peer_id.hex()[:8])
         return None
@@ -138,11 +143,9 @@ def process_hello_ack(
 
     # 4. Derive session key
     session_key = derive_session_key(shared_secret, state.local_nonce, ack.random_nonce)
-    session_id = generate_session_id()
-
     return SessionKeys(
         encryption_key=session_key,
-        session_id=session_id,
+        session_id=ack.session_id,
         remote_peer_id=remote_peer_id,
         remote_public_key_bytes=ack.identity_public_key,
     )
@@ -192,13 +195,14 @@ def process_hello(
     session_key = derive_session_key(shared_secret, hello.random_nonce, our_nonce)
     session_id = generate_session_id()
 
-    # 7. Sign HELLO_ACK: sign(identity_private, our_eph || remote_eph || remote_nonce)
-    ack_signed_data = eph_pub_bytes + hello.ephemeral_public_key + hello.random_nonce
+    # 7. Sign HELLO_ACK: sign(identity_private, session_id || our_eph || remote_eph || remote_nonce)
+    ack_signed_data = session_id + eph_pub_bytes + hello.ephemeral_public_key + hello.random_nonce
     ack_sig = local_identity.sign(ack_signed_data)
 
     ack_payload = HelloAckPayload(
         identity_public_key=local_identity.public_key_bytes,
         ephemeral_public_key=eph_pub_bytes,
+        session_id=session_id,
         random_nonce=our_nonce,
         signature=ack_sig,
     )

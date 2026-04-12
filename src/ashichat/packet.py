@@ -144,15 +144,17 @@ class HelloAckPayload:
 
     identity_public_key: bytes  # 32
     ephemeral_public_key: bytes  # 32
+    session_id: bytes  # 8
     random_nonce: bytes  # 16
     signature: bytes  # 64
 
-    _SIZE = 144
+    _SIZE = 152
 
     def serialize(self) -> bytes:
         return (
             self.identity_public_key
             + self.ephemeral_public_key
+            + self.session_id
             + self.random_nonce
             + self.signature
         )
@@ -164,8 +166,9 @@ class HelloAckPayload:
         return cls(
             identity_public_key=data[0:32],
             ephemeral_public_key=data[32:64],
-            random_nonce=data[64:80],
-            signature=data[80:144],
+            session_id=data[64:72],
+            random_nonce=data[72:88],
+            signature=data[88:152],
         )
 
 

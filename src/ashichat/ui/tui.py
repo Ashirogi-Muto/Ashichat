@@ -51,6 +51,7 @@ class AshiChatApp(App):
         if self.node:
             self.node.on_message_received(self._handle_incoming)
             self.node.on_peer_state_changed(self._handle_state_change)
+            self.node.on_peers_changed(self._handle_peers_changed)
             await self.refresh_peers_from_node()
         else:
             self.query_one("#chat-view", ChatView).add_system_message("Node not attached.")
@@ -72,6 +73,19 @@ class AshiChatApp(App):
     def _do_handle_state_change(self, peer_id: bytes, old, new) -> None:
         sidebar = self.query_one("#sidebar", Sidebar)
         sidebar.update_peer_state(peer_id, new)
+
+    def _handle_peers_changed(self) -> None:
+        self.call_from_thread(self._schedule_peer_refresh)
+
+    def _schedule_peer_refresh(self) -> None:
+        if not self.node:
+            return
+        self.run_worker(
+            self.refresh_peers_from_node(),
+            name="refresh-peers",
+            group="peer-refresh",
+            exclusive=True,
+        )
 
     async def refresh_peers_from_node(self) -> None:
         """Load peers from storage into sidebar, preserving active selection when possible."""

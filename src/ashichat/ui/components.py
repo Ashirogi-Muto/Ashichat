@@ -420,20 +420,7 @@ class InviteDialog(ModalScreen):
                 out.update(self._get_menu_text())
                 self._state = "MENU"
                 return
-            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-            from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-            from ashichat.identity import derive_peer_id
-            from ashichat.invite import parse_invite
 
-            # 1) Parse and validate invite format.
-            try:
-                data = parse_invite(cmd)
-            except Exception as e:
-                out.update(f"[ERR] Invalid invite format: {e}\n\nPress Enter to return.")
-                self._state = "WAIT"
-                return
-
-            # 2) Add contact to local state/storage.
             try:
                 app = self.app
                 if not (hasattr(app, "node") and app.node and app.node.identity):
@@ -441,55 +428,27 @@ class InviteDialog(ModalScreen):
                     self._state = "WAIT"
                     return
 
-                pub_raw = data.public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
-                pub_key = Ed25519PublicKey.from_public_bytes(pub_raw)
-                peer_id = derive_peer_id(pub_key)
-
-                if peer_id == app.node.identity.peer_id:
-                    out.update("[ERR] Cannot add your own invite.\n\nPress Enter to return.")
-                    self._state = "WAIT"
-                    return
-
-                nickname = peer_id.hex()[:8]
-                await app.node.storage.add_peer(peer_id, pub_raw, nickname)
-                saved = await app.node.storage.get_peer(peer_id)
-                if saved is None:
-                    raise RuntimeError("peer insert verification failed")
-
-                if app.node.peer_table:
-                    app.node.peer_table.add_direct_peer(
-                        peer_id,
-                        pub_raw,
-                        nickname=nickname,
-                        endpoint=data.endpoint,
-                    )
-
-                # Fallback UI update even if refresh path fails.
+                result = await app.node.add_contact_from_invite(cmd)
+                if hasattr(app, "refresh_peers_from_node"):
+                    await app.refresh_peers_from_node()
                 try:
                     sidebar = app.query_one("#sidebar", Sidebar)
-                    sidebar.add_peer(peer_id, nickname, state="disconnected", archived=False)
-                    sidebar.set_active_peer(peer_id)
+                    sidebar.set_active_peer(result.peer_id)
                     chat = app.query_one("#chat-view", ChatView)
-                    chat.set_active_peer(peer_id, nickname)
+                    chat.set_active_peer(result.peer_id, sidebar.get_active_peer_name())
                 except Exception:
                     pass
 
-                if data.endpoint is not None:
-                    await app.node.connect_to_peer(peer_id, data.endpoint)
-
-                if hasattr(app, "refresh_peers_from_node"):
-                    await app.refresh_peers_from_node()
-
                 immediate = (
                     "Connection attempt started."
-                    if data.endpoint is not None
+                    if result.connection_started
                     else "No endpoint hint in invite; waiting for manual/overlay discovery."
                 )
                 out.update(
-                    f"[OK] Contact added!\nPeer: {peer_id.hex()[:8]}\n{immediate}\n\nPress Enter to return."
+                    f"[OK] Contact added!\nPeer: {result.peer_id.hex()[:8]}\n{immediate}\n\nPress Enter to return."
                 )
             except Exception as e:
-                out.update(f"[ERR] Invite parsed but contact add failed: {e}\n\nPress Enter to return.")
+                out.update(f"[ERR] Invite accept failed: {e}\n\nPress Enter to return.")
             self._state = "WAIT"
 
 

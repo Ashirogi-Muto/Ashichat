@@ -103,6 +103,7 @@ class TestUDPLoopback:
         alice_keys = process_hello_ack(alice_received[0][0], alice_state, alice_known)
         assert alice_keys is not None
         assert alice_keys.encryption_key == bob_keys.encryption_key
+        assert alice_keys.session_id == bob_keys.session_id
 
         proto_a.close()
         proto_b.close()
