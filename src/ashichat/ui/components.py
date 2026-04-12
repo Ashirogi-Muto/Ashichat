@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,30 @@ from textual.widget import Widget
 from ashichat.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+def _guess_local_endpoint(app) -> tuple[str, int] | None:
+    """Best-effort endpoint hint for invite generation."""
+    if not (hasattr(app, "node") and app.node and app.node.config):
+        return None
+    port = app.node.config.network.udp_port
+    ip: str | None = None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+    except OSError:
+        pass
+
+    if not ip or ip.startswith("127."):
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            ip = None
+
+    if not ip or ip.startswith("127."):
+        return None
+    return (ip, port)
 
 
 # Status indicators — ASCII only for Windows terminal compatibility
@@ -364,10 +389,16 @@ class InviteDialog(ModalScreen):
                 if hasattr(app, "node") and app.node and app.node.identity:
                     from ashichat.invite import generate_invite, generate_invite_readable
 
-                    c85 = generate_invite(app.node.identity.public_key)
-                    c32 = generate_invite_readable(app.node.identity.public_key)
+                    endpoint_hint = _guess_local_endpoint(app)
+                    c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint_hint)
+                    c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint_hint)
+                    endpoint_note = (
+                        f"\nEndpoint hint: {endpoint_hint[0]}:{endpoint_hint[1]}"
+                        if endpoint_hint
+                        else "\nEndpoint hint: unavailable"
+                    )
                     out.update(
-                        f"--- Generated Invite ---\n\nBase85:\n{c85}\n\nBase32:\n{c32}\n\nPress Enter to return."
+                        f"--- Generated Invite ---\n\nBase85:\n{c85}\n\nBase32:\n{c32}\n{endpoint_note}\n\nPress Enter to return."
                     )
                 else:
                     out.update("Error: Node not running.\n\nPress Enter to return.")
@@ -421,10 +452,17 @@ class InviteDialog(ModalScreen):
                         nickname=nickname,
                         endpoint=data.endpoint,
                     )
+                if data.endpoint is not None:
+                    await app.node.connect_to_peer(peer_id, data.endpoint)
                 if hasattr(app, "refresh_peers_from_node"):
                     await app.refresh_peers_from_node()
+                immediate = (
+                    "Connection attempt started."
+                    if data.endpoint is not None
+                    else "No endpoint hint in invite; waiting for manual/overlay discovery."
+                )
                 out.update(
-                    f"[OK] Contact added!\nPeer: {peer_id.hex()[:8]}\n\nPress Enter to return."
+                    f"[OK] Contact added!\nPeer: {peer_id.hex()[:8]}\n{immediate}\n\nPress Enter to return."
                 )
             except Exception as e:
                 out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")

@@ -37,6 +37,10 @@ from ashichat.resolution import ResolutionManager
 from ashichat.session import Session, SessionRegistry
 from ashichat.storage import MessageLog, StorageManager
 from ashichat.transport_udp import UDPTransport, start_udp_listener
+from ashichat.handshake import create_hello, process_hello_ack
+from ashichat.identity import derive_peer_id
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 log = get_logger(__name__)
 
@@ -68,6 +72,7 @@ class Node:
 
         self._transport_obj: asyncio.DatagramTransport | None = None
         self._running = False
+        self._pending_hello_by_addr: dict[tuple[str, int], object] = {}
 
     # -- Event registration --------------------------------------------------
 
@@ -213,6 +218,23 @@ class Node:
     async def _handle_hello(self, packet: Packet, addr: tuple[str, int]) -> None:
         from ashichat.handshake import process_hello
 
+        hello = HelloPayload.deserialize(packet.payload)
+        remote_pub = Ed25519PublicKey.from_public_bytes(hello.identity_public_key)
+        remote_peer_id = derive_peer_id(remote_pub)
+
+        # Auto-trust peers that can complete a valid invite-derived handshake.
+        # This enables reciprocal contact creation on first connect.
+        if remote_peer_id not in self.peer_table.get_direct_peer_ids():
+            nickname = remote_peer_id.hex()[:8]
+            await self.storage.add_peer(remote_peer_id, hello.identity_public_key, nickname)
+            self.peer_table.add_direct_peer(
+                remote_peer_id,
+                hello.identity_public_key,
+                nickname=nickname,
+                endpoint=addr,
+            )
+            log.info("Auto-added new peer from HELLO: %s", nickname)
+
         known = self.peer_table.get_direct_peer_ids()
         result = process_hello(packet, known, self.identity)
         if result is None:
@@ -235,11 +257,40 @@ class Node:
         await self.peer_states.update_state(keys.remote_peer_id, PeerState.CONNECTED)
         self.heartbeat.register_peer(keys.remote_peer_id, keys.session_id, addr)
         await self.heartbeat.start_heartbeat(keys.remote_peer_id)
+        await self._flush_queued_for_peer(keys.remote_peer_id)
         log.info("Session established with %s (receiver)", keys.remote_peer_id.hex()[:8])
 
     async def _handle_hello_ack(self, packet: Packet, addr: tuple[str, int]) -> None:
-        # The handshake state would normally be tracked — simplified here
-        pass
+        state = self._pending_hello_by_addr.pop(addr, None)
+        if state is None:
+            return
+
+        known = self.peer_table.get_direct_peer_ids()
+        keys = process_hello_ack(packet, state, known)
+        if keys is None:
+            return
+
+        session = Session(
+            session_id=keys.session_id,
+            encryption_key=keys.encryption_key,
+            remote_peer_id=keys.remote_peer_id,
+        )
+        self.session_registry.register(session)
+        await self.storage.save_session_state(
+            session.session_id,
+            session.remote_peer_id,
+            session.send_sequence,
+            session.recv_sequence,
+        )
+        await self.peer_states.update_state(keys.remote_peer_id, PeerState.CONNECTED)
+        if self.peer_table:
+            entry = self.peer_table.get_entry(keys.remote_peer_id)
+            if entry:
+                entry.endpoint = addr
+        self.heartbeat.register_peer(keys.remote_peer_id, keys.session_id, addr)
+        await self.heartbeat.start_heartbeat(keys.remote_peer_id)
+        await self._flush_queued_for_peer(keys.remote_peer_id)
+        log.info("Session established with %s (initiator)", keys.remote_peer_id.hex()[:8])
 
     async def _handle_data(self, packet: Packet, addr: tuple[str, int]) -> None:
         dp = DataPayload.deserialize(packet.payload)
@@ -307,6 +358,9 @@ class Node:
 
         if session is None:
             log.info("Peer %s not connected — message queued", peer_id.hex()[:8])
+            endpoint = self.peer_table.get_endpoint(peer_id) if self.peer_table else None
+            if endpoint:
+                await self.connect_to_peer(peer_id, endpoint)
             return msg_id
 
         result = self.queue_manager.build_data_packet(msg_id, session)
@@ -322,6 +376,43 @@ class Node:
             self._send_to(pkt, endpoint)
 
         return msg_id
+
+    async def connect_to_peer(self, peer_id: bytes, endpoint: tuple[str, int]) -> None:
+        """Initiate HELLO to peer endpoint."""
+        if self.identity is None or self.transport is None:
+            return
+        if self.session_registry.get_by_peer_id(peer_id) is not None:
+            return
+
+        hello_pkt, state = create_hello(self.identity)
+        state.target_peer_id = peer_id
+        self._pending_hello_by_addr[endpoint] = state
+        if self.peer_table:
+            entry = self.peer_table.get_entry(peer_id)
+            if entry:
+                entry.endpoint = endpoint
+        try:
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+        except ValueError:
+            pass
+        self._send_to(hello_pkt, endpoint)
+
+    async def _flush_queued_for_peer(self, peer_id: bytes) -> None:
+        """Send queued messages immediately once a session exists."""
+        session = self.session_registry.get_by_peer_id(peer_id)
+        if session is None:
+            return
+        endpoint = self.peer_table.get_endpoint(peer_id) if self.peer_table else None
+        if endpoint is None:
+            return
+
+        for msg_id in self.queue_manager.get_queued_for_peer(peer_id):
+            result = self.queue_manager.build_data_packet(msg_id, session)
+            if result is None:
+                continue
+            pkt, _seq = result
+            await self.storage.update_send_sequence(session.session_id, session.send_sequence)
+            self._send_to(pkt, endpoint)
 
     async def rename_peer(self, peer_id: bytes, nickname: str) -> None:
         nickname = nickname.strip()
