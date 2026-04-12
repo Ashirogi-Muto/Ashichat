@@ -245,3 +245,270 @@ class InviteDialog(ModalScreen):
             except Exception as e:
                 out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
             self._state = "WAIT"
+
+
+class ProfileDialog(ModalScreen):
+    """CLI-style profile screen."""
+
+    DEFAULT_CSS = """
+    ProfileDialog {
+        align: center middle;
+    }
+    #profile-container {
+        width: 80;
+        height: 20;
+        background: #000000;
+        border: none;
+        padding: 1 2;
+    }
+    #profile-output {
+        height: 1fr;
+        background: #000000;
+        color: #ffffff;
+    }
+    #profile-input {
+        dock: bottom;
+        background: #000000;
+        color: #ffffff;
+        border: none;
+    }
+    #profile-input:focus {
+        border: none;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="profile-container"):
+            yield Static("", id="profile-output")
+            yield Input(placeholder="> ", id="profile-input")
+
+    def on_mount(self) -> None:
+        self._state = "MENU"
+        self._refresh_menu()
+        self.query_one("#profile-input", Input).focus()
+
+    def _get_base_dir(self):
+        app = self.app
+        if hasattr(app, "node") and app.node and app.node.config:
+            return app.node.config.base_dir
+        from pathlib import Path
+        return Path.home() / ".ashichat"
+
+    def _refresh_menu(self) -> None:
+        from ashichat.config import load_config
+
+        cfg = load_config(base_dir=self._get_base_dir())
+        app = self.app
+        fp = "N/A"
+        peer = "N/A"
+        pub = "N/A"
+        if hasattr(app, "node") and app.node and app.node.identity:
+            ident = app.node.identity
+            fp = ident.fingerprint()
+            peer = ident.peer_id.hex()
+            pub = ident.public_key_bytes.hex()
+
+        nickname = cfg.profile.nickname or "(unset)"
+        out = self.query_one("#profile-output", Static)
+        out.update(
+            "--- Profile ---\n\n"
+            f"Nickname: {nickname}\n"
+            f"Fingerprint: {fp}\n"
+            f"Peer ID: {peer}\n"
+            f"Public Key: {pub}\n\n"
+            "1. Set nickname\n"
+            "2. Clear nickname\n"
+            "3. Close\n\n"
+            "Type a number and press Enter."
+        )
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        cmd = event.value.strip()
+        event.input.value = ""
+        out = self.query_one("#profile-output", Static)
+
+        if self._state == "MENU":
+            if cmd == "1":
+                out.update("Enter nickname (max 32 chars):")
+                self._state = "SET_NICK"
+            elif cmd == "2":
+                from ashichat.config import ProfileConfig, update_config
+
+                try:
+                    update_config(self._get_base_dir(), profile=ProfileConfig(nickname=""))
+                    self._refresh_menu()
+                except Exception as e:
+                    out.update(f"[ERR] Could not clear nickname: {e}\n\nPress Enter to continue.")
+                    self._state = "WAIT"
+            elif cmd == "3":
+                self.dismiss()
+            else:
+                out.update(
+                    "Invalid option.\n\n"
+                    "Press Enter to return to menu."
+                )
+                self._state = "WAIT"
+        elif self._state == "SET_NICK":
+            from ashichat.config import ProfileConfig, update_config
+
+            try:
+                update_config(self._get_base_dir(), profile=ProfileConfig(nickname=cmd))
+                self._state = "MENU"
+                self._refresh_menu()
+            except Exception as e:
+                out.update(f"[ERR] Invalid nickname: {e}\n\nPress Enter to continue.")
+                self._state = "WAIT"
+        elif self._state == "WAIT":
+            self._state = "MENU"
+            self._refresh_menu()
+
+
+class SettingsDialog(ModalScreen):
+    """CLI-style settings screen."""
+
+    DEFAULT_CSS = """
+    SettingsDialog {
+        align: center middle;
+    }
+    #settings-container {
+        width: 80;
+        height: 22;
+        background: #000000;
+        border: none;
+        padding: 1 2;
+    }
+    #settings-output {
+        height: 1fr;
+        background: #000000;
+        color: #ffffff;
+    }
+    #settings-input {
+        dock: bottom;
+        background: #000000;
+        color: #ffffff;
+        border: none;
+    }
+    #settings-input:focus {
+        border: none;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-container"):
+            yield Static("", id="settings-output")
+            yield Input(placeholder="> ", id="settings-input")
+
+    def on_mount(self) -> None:
+        from ashichat.config import load_config
+
+        self._state = "MENU"
+        self._edit_key: str | None = None
+        self._base_dir = self._get_base_dir()
+        cfg = load_config(base_dir=self._base_dir)
+        self._draft = {
+            "udp_port": cfg.network.udp_port,
+            "max_peers": cfg.network.max_peers,
+            "overlay_k": cfg.network.overlay_k,
+            "message_log_limit_mb": cfg.storage.message_log_limit_mb,
+            "max_log_rotations": cfg.storage.max_log_rotations,
+            "log_level": cfg.debug.log_level,
+        }
+        self._refresh_menu()
+        self.query_one("#settings-input", Input).focus()
+
+    def _get_base_dir(self):
+        app = self.app
+        if hasattr(app, "node") and app.node and app.node.config:
+            return app.node.config.base_dir
+        from pathlib import Path
+        return Path.home() / ".ashichat"
+
+    def _refresh_menu(self) -> None:
+        out = self.query_one("#settings-output", Static)
+        out.update(
+            "--- Settings ---\n\n"
+            f"1. UDP Port: {self._draft['udp_port']}\n"
+            f"2. Max Peers: {self._draft['max_peers']}\n"
+            f"3. Overlay K: {self._draft['overlay_k']}\n"
+            f"4. Message Log Limit MB: {self._draft['message_log_limit_mb']}\n"
+            f"5. Max Log Rotations: {self._draft['max_log_rotations']}\n"
+            f"6. Log Level: {self._draft['log_level']}\n\n"
+            "7. Save and close\n"
+            "8. Close without saving\n\n"
+            "Restart AshiChat after saving for changes to take effect."
+        )
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        cmd = event.value.strip()
+        event.input.value = ""
+        out = self.query_one("#settings-output", Static)
+
+        if self._state == "MENU":
+            if cmd in {"1", "2", "3", "4", "5", "6"}:
+                field_map = {
+                    "1": ("udp_port", "Enter UDP port (1-65535):"),
+                    "2": ("max_peers", "Enter max peers (>=1):"),
+                    "3": ("overlay_k", "Enter overlay K (>=1):"),
+                    "4": ("message_log_limit_mb", "Enter log limit MB (>=1):"),
+                    "5": ("max_log_rotations", "Enter max rotations (>=1):"),
+                    "6": ("log_level", "Enter log level: DEBUG/INFO/WARNING/ERROR/CRITICAL"),
+                }
+                self._edit_key, prompt = field_map[cmd]
+                out.update(prompt)
+                self._state = "EDIT"
+            elif cmd == "7":
+                from ashichat.config import (
+                    DebugConfig,
+                    NetworkConfig,
+                    StorageConfig,
+                    load_config,
+                    update_config,
+                )
+
+                try:
+                    current = load_config(base_dir=self._base_dir)
+                    new_cfg = update_config(
+                        self._base_dir,
+                        network=NetworkConfig(
+                            udp_port=int(self._draft["udp_port"]),
+                            max_peers=int(self._draft["max_peers"]),
+                            overlay_k=int(self._draft["overlay_k"]),
+                        ),
+                        storage=StorageConfig(
+                            message_log_limit_mb=int(self._draft["message_log_limit_mb"]),
+                            max_log_rotations=int(self._draft["max_log_rotations"]),
+                        ),
+                        debug=DebugConfig(log_level=str(self._draft["log_level"]).upper()),
+                        profile=current.profile,
+                    )
+                    if hasattr(self.app, "node") and self.app.node:
+                        self.app.node.config = new_cfg
+                    self.dismiss()
+                except Exception as e:
+                    out.update(f"[ERR] Could not save settings: {e}\n\nPress Enter to continue.")
+                    self._state = "WAIT"
+            elif cmd == "8":
+                self.dismiss()
+            else:
+                out.update(
+                    "Invalid option.\n\n"
+                    "Press Enter to return to menu."
+                )
+                self._state = "WAIT"
+        elif self._state == "EDIT":
+            assert self._edit_key is not None
+            try:
+                key = self._edit_key
+                if key == "log_level":
+                    self._draft[key] = cmd.upper()
+                else:
+                    self._draft[key] = int(cmd)
+                self._state = "MENU"
+                self._edit_key = None
+                self._refresh_menu()
+            except ValueError:
+                out.update("[ERR] Invalid numeric value.\n\nPress Enter to continue.")
+                self._state = "WAIT"
+        elif self._state == "WAIT":
+            self._state = "MENU"
+            self._refresh_menu()

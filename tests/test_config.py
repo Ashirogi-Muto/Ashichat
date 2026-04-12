@@ -10,10 +10,13 @@ from ashichat.config import (
     AshiChatConfig,
     DebugConfig,
     NetworkConfig,
+    ProfileConfig,
     StorageConfig,
     _parse_config,
     ensure_directory_structure,
     load_config,
+    save_config,
+    update_config,
 )
 
 
@@ -32,6 +35,7 @@ class TestDefaultConfig:
         assert cfg.storage.message_log_limit_mb == 100
         assert cfg.storage.max_log_rotations == 3
         assert cfg.debug.log_level == "INFO"
+        assert cfg.profile.nickname == ""
         assert cfg.base_dir == base
 
     def test_directory_structure_created(self, tmp_path: Path) -> None:
@@ -66,6 +70,17 @@ class TestTOMLParsing:
         assert cfg.storage.message_log_limit_mb == 50
         assert cfg.storage.max_log_rotations == 2
         assert cfg.debug.log_level == "DEBUG"
+        assert cfg.profile.nickname == ""
+
+    def test_profile_nickname(self, tmp_path: Path) -> None:
+        base = tmp_path / ".ashichat"
+        ensure_directory_structure(base)
+        (base / "config.toml").write_text(
+            '[profile]\nnickname = "alice"\n',
+            encoding="utf-8",
+        )
+        cfg = load_config(base_dir=base)
+        assert cfg.profile.nickname == "alice"
 
     def test_missing_sections_fall_back(self, tmp_path: Path) -> None:
         base = tmp_path / ".ashichat"
@@ -109,6 +124,40 @@ class TestValidation:
     def test_invalid_log_level(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="log_level"):
             _parse_config({"debug": {"log_level": "VERBOSE"}}, tmp_path)
+
+    def test_invalid_nickname(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="nickname"):
+            _parse_config({"profile": {"nickname": "x" * 33}}, tmp_path)
+
+
+class TestPersistence:
+    def test_save_config_roundtrip(self, tmp_path: Path) -> None:
+        base = tmp_path / ".ashichat"
+        cfg = AshiChatConfig(
+            network=NetworkConfig(udp_port=12345, max_peers=200, overlay_k=30),
+            storage=StorageConfig(message_log_limit_mb=50, max_log_rotations=2),
+            debug=DebugConfig(log_level="DEBUG"),
+            profile=ProfileConfig(nickname="alice"),
+            base_dir=base,
+        )
+        save_config(cfg)
+
+        loaded = load_config(base_dir=base)
+        assert loaded.network.udp_port == 12345
+        assert loaded.storage.max_log_rotations == 2
+        assert loaded.debug.log_level == "DEBUG"
+        assert loaded.profile.nickname == "alice"
+
+    def test_update_config_partial(self, tmp_path: Path) -> None:
+        base = tmp_path / ".ashichat"
+        ensure_directory_structure(base)
+
+        updated = update_config(base, profile=ProfileConfig(nickname="newname"))
+        assert updated.profile.nickname == "newname"
+
+        loaded = load_config(base_dir=base)
+        assert loaded.profile.nickname == "newname"
+        assert loaded.network.udp_port == 9000
 
 
 # ── Immutability ────────────────────────────────────────────────────────

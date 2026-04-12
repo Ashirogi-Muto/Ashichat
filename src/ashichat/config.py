@@ -39,11 +39,18 @@ class DebugConfig:
 
 
 @dataclass(frozen=True)
+class ProfileConfig:
+    """Local profile settings."""
+    nickname: str = ""
+
+
+@dataclass(frozen=True)
 class AshiChatConfig:
     """Top-level application configuration."""
     network: NetworkConfig = field(default_factory=NetworkConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
     base_dir: Path = field(default_factory=lambda: Path.home() / ".ashichat")
 
 
@@ -66,6 +73,9 @@ max_log_rotations = 3
 
 [debug]
 log_level = "INFO"
+
+[profile]
+nickname = ""
 """
 
 
@@ -87,6 +97,13 @@ def _validate_log_level(level: str) -> None:
     valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     if level.upper() not in valid:
         raise ValueError(f"log_level must be one of {valid}, got {level!r}")
+
+
+def _validate_nickname(nickname: str) -> None:
+    if len(nickname) > 32:
+        raise ValueError("nickname must be <= 32 chars")
+    if any(ord(ch) < 32 for ch in nickname):
+        raise ValueError("nickname cannot contain control characters")
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +154,19 @@ def _parse_debug(raw: dict[str, Any]) -> DebugConfig:
     return DebugConfig(log_level=level.upper())
 
 
+def _parse_profile(raw: dict[str, Any]) -> ProfileConfig:
+    nickname = str(raw.get("nickname", "")).strip()
+    _validate_nickname(nickname)
+    return ProfileConfig(nickname=nickname)
+
+
 def _parse_config(raw: dict[str, Any], base_dir: Path) -> AshiChatConfig:
     """Build a validated AshiChatConfig from parsed TOML dict."""
     return AshiChatConfig(
         network=_parse_network(raw.get("network", {})),
         storage=_parse_storage(raw.get("storage", {})),
         debug=_parse_debug(raw.get("debug", {})),
+        profile=_parse_profile(raw.get("profile", {})),
         base_dir=base_dir,
     )
 
@@ -169,3 +193,50 @@ def load_config(base_dir: Path | None = None) -> AshiChatConfig:
             raw = tomllib.load(f)
 
     return _parse_config(raw, base_dir)
+
+
+def _to_toml(config: AshiChatConfig) -> str:
+    """Render a deterministic TOML representation of config."""
+    nickname = config.profile.nickname.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        "# AshiChat configuration — https://github.com/AshiChat\n"
+        "# Edit values below. Restart AshiChat for changes to take effect.\n\n"
+        "[network]\n"
+        f"udp_port = {config.network.udp_port}\n"
+        f"max_peers = {config.network.max_peers}\n"
+        f"overlay_k = {config.network.overlay_k}\n\n"
+        "[storage]\n"
+        f"message_log_limit_mb = {config.storage.message_log_limit_mb}\n"
+        f"max_log_rotations = {config.storage.max_log_rotations}\n\n"
+        "[debug]\n"
+        f'log_level = "{config.debug.log_level}"\n\n'
+        "[profile]\n"
+        f'nickname = "{nickname}"\n'
+    )
+
+
+def save_config(config: AshiChatConfig) -> None:
+    """Persist validated config to ``config.base_dir/config.toml``."""
+    ensure_directory_structure(config.base_dir)
+    (config.base_dir / "config.toml").write_text(_to_toml(config), encoding="utf-8")
+
+
+def update_config(
+    base_dir: Path,
+    *,
+    network: NetworkConfig | None = None,
+    storage: StorageConfig | None = None,
+    debug: DebugConfig | None = None,
+    profile: ProfileConfig | None = None,
+) -> AshiChatConfig:
+    """Update and persist selected config sections; returns new config."""
+    current = load_config(base_dir=base_dir)
+    new_config = AshiChatConfig(
+        network=network or current.network,
+        storage=storage or current.storage,
+        debug=debug or current.debug,
+        profile=profile or current.profile,
+        base_dir=base_dir,
+    )
+    save_config(new_config)
+    return new_config

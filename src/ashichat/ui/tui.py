@@ -19,10 +19,12 @@ class AshiChatApp(App):
     TITLE = "AshiChat v0.1.0"
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("tab", "focus_next", "Next"),
-        Binding("escape", "unfocus", "Unfocus"),
-        Binding("i", "show_invite", "Invite"),
+        Binding("q", "quit", "Quit", priority=True),
+        Binding("tab", "focus_next", "Next", priority=True),
+        Binding("escape", "unfocus", "Unfocus", priority=True),
+        Binding("i", "show_invite", "Invite", priority=True),
+        Binding("p", "show_profile", "Profile", priority=True),
+        Binding("s", "show_settings", "Settings", priority=True),
     ]
 
     def __init__(self, node=None) -> None:
@@ -60,3 +62,11 @@ class AshiChatApp(App):
     async def action_show_invite(self) -> None:
         from ashichat.ui.components import InviteDialog
         await self.push_screen(InviteDialog())
+
+    async def action_show_profile(self) -> None:
+        from ashichat.ui.components import ProfileDialog
+        await self.push_screen(ProfileDialog())
+
+    async def action_show_settings(self) -> None:
+        from ashichat.ui.components import SettingsDialog
+        await self.push_screen(SettingsDialog())
