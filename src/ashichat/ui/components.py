@@ -550,19 +550,49 @@ class InviteDialog(ModalScreen):
                 
             try:
                 from ashichat.invite import parse_invite
+                from ashichat.identity import derive_peer_id
+                from ashichat.peer_state import PeerState
+                import asyncio
+                
+                # 1. Parse the invite string
                 data = parse_invite(cmd)
+                peer_id = derive_peer_id(data.public_key)
+                pub_bytes = data.public_key.public_bytes_raw()
                 
                 ep_str = f"{data.endpoint[0]}:{data.endpoint[1]}" if data.endpoint else "No IP found"
+                
+                app = self.app
+                if hasattr(app, "node") and app.node:
+                    nickname = f"Peer-{peer_id.hex()[:4]}"
+                    
+                    # 2. Add to the Node's active Peer Table
+                    app.node.peer_table.add_direct_peer(
+                        peer_id=peer_id,
+                        public_key=pub_bytes,
+                        nickname=nickname,
+                        endpoint=data.endpoint
+                    )
+                    
+                    # 3. Save to SQLite database so the contact persists after restarts
+                    asyncio.create_task(
+                        app.node.storage.add_peer(peer_id, pub_bytes, nickname)
+                    )
+                    
+                    # 4. Update the Peer State to trigger the TUI Sidebar update
+                    asyncio.create_task(
+                        app.node.peer_states.update_state(peer_id, PeerState.CONNECTING)
+                    )
+
                 out.update(
-                    f"[OK] Invite parsed!\n"
-                    f"Key: {data.public_key.public_bytes_raw().hex()[:16]}...\n"
+                    f"[OK] Contact Added to Address Book!\n"
+                    f"ID: {peer_id.hex()[:8]}\n"
                     f"Endpoint: {ep_str}\n\n"
                     f"Press Enter to return."
                 )
             except Exception as e:
                 out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
             self._state = "WAIT"
-            
+
 
 class ProfileDialog(ModalScreen):
     """CLI-style profile screen."""
