@@ -307,27 +307,94 @@ class MessageInput(Widget):
         yield Input(placeholder="Type a message...", id="msg-input")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
-        if not text:
-            return
+        cmd = event.value.strip()
         event.input.value = ""
+        out = self.query_one("#cli-output", Static)
 
-        app = self.app
-        chat = app.query_one("#chat-view", ChatView)
-        sidebar = app.query_one("#sidebar", Sidebar)
-        active_peer = sidebar.get_active_peer_id()
-        if active_peer is None:
-            chat.add_system_message("No active contact selected.")
-            return
+        if self._state == "MENU":
+            if cmd == "1":
+                app = self.app
+                if hasattr(app, "node") and app.node and app.node.identity:
+                    # Update UI so the user knows we are reaching out to the internet
+                    out.update("--- Generate Invite ---\n\nDiscovering Public IP... Please wait.")
+                    self._state = "FETCHING"
+                    
+                    # Safe, non-blocking IP fetcher
+                    def fetch_ip():
+                        import urllib.request
+                        try:
+                            # 3-second timeout so the app never hangs indefinitely
+                            req = urllib.request.urlopen('https://api.ipify.org', timeout=3)
+                            return req.read().decode('utf-8').strip()
+                        except Exception:
+                            return None
 
-        if hasattr(app, "node") and app.node:
-            try:
-                await app.node.send_message(active_peer, text)
-            except Exception as e:
-                chat.add_system_message(f"Send failed: {e}")
+                    # Run the HTTP request in a background thread
+                    import asyncio
+                    ip = await asyncio.to_thread(fetch_ip)
+                    
+                    # Grab the port from your local node config
+                    port = app.node.config.network.udp_port
+                    endpoint = (ip, port) if ip else None
+
+                    try:
+                        from ashichat.invite import generate_invite, generate_invite_readable
+                        c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint)
+                        c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint)
+                        
+                        ip_display = ip if ip else "Failed to discover IP (NAT restricted)"
+                        out.update(
+                            f"--- Generated Invite ---\n\n"
+                            f"Public Endpoint: {ip_display}:{port}\n\n"
+                            f"Base85:\n{c85}\n\n"
+                            f"Base32:\n{c32}\n\n"
+                            f"Press Enter to return."
+                        )
+                    except Exception as e:
+                        out.update(f"[ERR] Failed to generate invite: {e}\n\nPress Enter to return.")
+                        
+                    self._state = "WAIT"
+                else:
+                    out.update("Error: Node not running.\n\nPress Enter to return.")
+                    self._state = "WAIT"
+                    
+            elif cmd == "2":
+                out.update("--- Accept Invite ---\n\nPaste the invite code and press Enter:")
+                self._state = "ACCEPT"
+            elif cmd == "3":
+                self.dismiss()
+            else:
+                out.update(self._get_menu_text() + f"\n\n[!] Invalid option: '{cmd}'")
+
+        elif self._state == "WAIT":
+            out.update(self._get_menu_text())
+            self._state = "MENU"
+
+        elif self._state == "ACCEPT":
+            if not cmd:
+                out.update(self._get_menu_text())
+                self._state = "MENU"
                 return
-
-        chat.add_message(active_peer, text, incoming=False)
+                
+            try:
+                from ashichat.invite import parse_invite
+                data = parse_invite(cmd)
+                
+                ep_str = f"{data.endpoint[0]}:{data.endpoint[1]}" if data.endpoint else "No IP found"
+                out.update(
+                    f"[OK] Invite parsed!\n"
+                    f"Key: {data.public_key.public_bytes_raw().hex()[:16]}...\n"
+                    f"Endpoint: {ep_str}\n\n"
+                    f"Press Enter to return."
+                )
+                
+                # NOTE: To actually connect, you will eventually want to do something like:
+                # app.node.peer_table.add_direct_peer(derive_peer_id(data.public_key), data.public_key, "New Peer", data.endpoint)
+                # app.node.reconnect.trigger_reconnect(derive_peer_id(data.public_key))
+                
+            except Exception as e:
+                out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
+            self._state = "WAIT"
 
 
 class InviteDialog(ModalScreen):
