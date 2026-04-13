@@ -62,7 +62,7 @@ class AshiChatApp(App):
         log.info("TUI mounted")
 
     def _handle_incoming(self, peer_id: bytes, plaintext: bytes) -> None:
-        self.call_from_thread(self._do_handle_incoming, peer_id, plaintext)
+        self.call_later(self._do_handle_incoming, peer_id, plaintext)
 
     def _do_handle_incoming(self, peer_id: bytes, plaintext: bytes) -> None:
         sidebar = self._sidebar_ref
@@ -72,16 +72,16 @@ class AshiChatApp(App):
             sidebar.increment_unread(peer_id)
 
     def _handle_state_change(self, peer_id: bytes, old, new) -> None:
-        self.call_from_thread(self._do_handle_state_change, peer_id, old, new)
+        self.call_later(self._do_handle_state_change, peer_id, old, new)
 
     def _do_handle_state_change(self, peer_id: bytes, old, new) -> None:
         self._sidebar_ref.update_peer_state(peer_id, new)
 
     def _handle_peers_changed(self) -> None:
-        self.call_from_thread(self._schedule_peer_refresh)
+        self.call_later(self._schedule_peer_refresh)
 
     def _handle_connection_event(self, message: str) -> None:
-        self.call_from_thread(self._do_handle_connection_event, message)
+        self.call_later(self._do_handle_connection_event, message)
 
     def _do_handle_connection_event(self, message: str) -> None:
         self._chatview_ref.add_system_message(message)
