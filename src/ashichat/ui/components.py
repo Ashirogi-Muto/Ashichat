@@ -460,11 +460,10 @@ class InviteDialog(ModalScreen):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         cmd = event.value.strip()
         
-        # Don't clear the input value here anymore, so we can pre-fill it in the CONFIRM_IP state
         out = self.query_one("#cli-output", Static)
 
         if self._state == "MENU":
-            event.input.value = "" # Clear menu selection
+            event.input.value = "" 
             if cmd == "1":
                 app = self.app
                 if hasattr(app, "node") and app.node and app.node.identity:
@@ -482,7 +481,6 @@ class InviteDialog(ModalScreen):
                     import asyncio
                     ip = await asyncio.to_thread(fetch_ip)
                     
-                    # NEW LOGIC: Pre-fill the input box and ask the user to confirm!
                     out.update(
                         f"--- Confirm Endpoint IP ---\n\n"
                         f"Detected IP: {ip if ip else 'None'}\n\n"
@@ -491,7 +489,6 @@ class InviteDialog(ModalScreen):
                         f"Press Enter to confirm and generate."
                     )
                     
-                    # Pre-fill the text box for the user
                     event.input.value = ip
                     self._state = "CONFIRM_IP"
                 else:
@@ -499,7 +496,8 @@ class InviteDialog(ModalScreen):
                     self._state = "WAIT"
                     
             elif cmd == "2":
-                out.update("--- Accept Invite ---\n\nPaste the invite code and press Enter:")
+                # ADDED PASTE INSTRUCTIONS HERE
+                out.update("--- Accept Invite ---\n\nPaste the invite code (Right-Click or Ctrl+Shift+V) and press Enter:")
                 self._state = "ACCEPT"
             elif cmd == "3":
                 self.dismiss()
@@ -507,7 +505,7 @@ class InviteDialog(ModalScreen):
                 out.update(self._get_menu_text() + f"\n\n[!] Invalid option: '{cmd}'")
 
         elif self._state == "CONFIRM_IP":
-            event.input.value = "" # Clear it now that we've read it
+            event.input.value = "" 
             ip = cmd 
             app = self.app
             port = app.node.config.network.udp_port
@@ -518,11 +516,18 @@ class InviteDialog(ModalScreen):
                 c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint)
                 c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint)
                 
+                # ADDED AUTO-COPY LOGIC HERE
+                try:
+                    app.copy_to_clipboard(c85)
+                    copy_status = "(Auto-copied to clipboard!)"
+                except Exception:
+                    copy_status = ""
+                
                 ip_display = ip if ip else "None (NAT Restricted)"
                 out.update(
                     f"--- Generated Invite ---\n\n"
                     f"Endpoint: {ip_display}:{port}\n\n"
-                    f"Base85:\n{c85}\n\n"
+                    f"Base85 {copy_status}:\n{c85}\n\n"
                     f"Base32:\n{c32}\n\n"
                     f"Press Enter to return."
                 )
@@ -557,6 +562,7 @@ class InviteDialog(ModalScreen):
             except Exception as e:
                 out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
             self._state = "WAIT"
+            
 
 class ProfileDialog(ModalScreen):
     """CLI-style profile screen."""
