@@ -307,106 +307,29 @@ class MessageInput(Widget):
         yield Input(placeholder="Type a message...", id="msg-input")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        cmd = event.value.strip()
-        
-        # Don't clear the input value here anymore, so we can pre-fill it in the CONFIRM_IP state
-        out = self.query_one("#cli-output", Static)
+        text = event.value.strip()
+        event.input.value = ""
+        if not text:
+            return
 
-        if self._state == "MENU":
-            event.input.value = "" # Clear menu selection
-            if cmd == "1":
-                app = self.app
-                if hasattr(app, "node") and app.node and app.node.identity:
-                    out.update("--- Generate Invite ---\n\nDetecting Public IP... Please wait.")
-                    self._state = "FETCHING"
-                    
-                    def fetch_ip():
-                        import urllib.request
-                        try:
-                            req = urllib.request.urlopen('https://api.ipify.org', timeout=3)
-                            return req.read().decode('utf-8').strip()
-                        except Exception:
-                            return ""
+        app = self.app
+        if not (hasattr(app, "node") and app.node):
+            return
 
-                    import asyncio
-                    ip = await asyncio.to_thread(fetch_ip)
-                    
-                    # NEW LOGIC: Pre-fill the input box and ask the user to confirm!
-                    out.update(
-                        f"--- Confirm Endpoint IP ---\n\n"
-                        f"Detected IP: {ip if ip else 'None'}\n\n"
-                        f"NOTE: If you are on a cloud server (OCI, AWS), this detected IP might be an outbound NAT address. "
-                        f"If so, replace it below with your server's actual assigned Public IP.\n\n"
-                        f"Press Enter to confirm and generate."
-                    )
-                    
-                    # Pre-fill the text box for the user
-                    event.input.value = ip
-                    self._state = "CONFIRM_IP"
-                else:
-                    out.update("Error: Node not running.\n\nPress Enter to return.")
-                    self._state = "WAIT"
-                    
-            elif cmd == "2":
-                out.update("--- Accept Invite ---\n\nPaste the invite code and press Enter:")
-                self._state = "ACCEPT"
-            elif cmd == "3":
-                self.dismiss()
-            else:
-                out.update(self._get_menu_text() + f"\n\n[!] Invalid option: '{cmd}'")
+        peer_id = getattr(app, "_active_peer_id", None)
+        if peer_id is None:
+            chat = app.query_one("#chat-view", ChatView)
+            chat.add_system_message("Select a contact first.")
+            return
 
-        # NEW STATE: The user has pressed Enter on the pre-filled IP box
-        elif self._state == "CONFIRM_IP":
-            event.input.value = "" # Clear it now that we've read it
-            ip = cmd 
-            app = self.app
-            port = app.node.config.network.udp_port
-            endpoint = (ip, port) if ip else None
+        chat = app.query_one("#chat-view", ChatView)
+        chat.add_message(peer_id, text, incoming=False)
 
-            try:
-                from ashichat.invite import generate_invite, generate_invite_readable
-                c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint)
-                c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint)
-                
-                ip_display = ip if ip else "None (NAT Restricted)"
-                out.update(
-                    f"--- Generated Invite ---\n\n"
-                    f"Endpoint: {ip_display}:{port}\n\n"
-                    f"Base85:\n{c85}\n\n"
-                    f"Base32:\n{c32}\n\n"
-                    f"Press Enter to return."
-                )
-            except Exception as e:
-                out.update(f"[ERR] Failed to generate invite: {e}\n\nPress Enter to return.")
-                
-            self._state = "WAIT"
-
-        elif self._state == "WAIT":
-            event.input.value = ""
-            out.update(self._get_menu_text())
-            self._state = "MENU"
-
-        elif self._state == "ACCEPT":
-            event.input.value = ""
-            if not cmd:
-                out.update(self._get_menu_text())
-                self._state = "MENU"
-                return
-                
-            try:
-                from ashichat.invite import parse_invite
-                data = parse_invite(cmd)
-                
-                ep_str = f"{data.endpoint[0]}:{data.endpoint[1]}" if data.endpoint else "No IP found"
-                out.update(
-                    f"[OK] Invite parsed!\n"
-                    f"Key: {data.public_key.public_bytes_raw().hex()[:16]}...\n"
-                    f"Endpoint: {ep_str}\n\n"
-                    f"Press Enter to return."
-                )
-            except Exception as e:
-                out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
-            self._state = "WAIT"
+        try:
+            await app.node.send_message(peer_id, text)
+        except Exception:
+            log.exception("Failed to send message")
+            chat.add_system_message("Failed to send message.")
 
 
 class InviteDialog(ModalScreen):
@@ -547,48 +470,32 @@ class InviteDialog(ModalScreen):
                 out.update(self._get_menu_text())
                 self._state = "MENU"
                 return
-                
+
+            app = self.app
+            if not (hasattr(app, "node") and app.node):
+                out.update("[ERR] Node not running.\n\nPress Enter to return.")
+                self._state = "WAIT"
+                return
+
             try:
-                from ashichat.invite import parse_invite
-                from ashichat.identity import derive_peer_id
-                from ashichat.peer_state import PeerState
-                import asyncio
-                
-                # 1. Parse the invite string
-                data = parse_invite(cmd)
-                peer_id = derive_peer_id(data.public_key)
-                pub_bytes = data.public_key.public_bytes_raw()
-                
-                ep_str = f"{data.endpoint[0]}:{data.endpoint[1]}" if data.endpoint else "No IP found"
-                
-                app = self.app
-                if hasattr(app, "node") and app.node:
-                    nickname = f"Peer-{peer_id.hex()[:4]}"
-                    
-                    # 2. Add to the Node's active Peer Table
-                    app.node.peer_table.add_direct_peer(
-                        peer_id=peer_id,
-                        public_key=pub_bytes,
-                        nickname=nickname,
-                        endpoint=data.endpoint
-                    )
-                    
-                    # 3. Save to SQLite database so the contact persists after restarts
-                    asyncio.create_task(
-                        app.node.storage.add_peer(peer_id, pub_bytes, nickname)
-                    )
-                    
-                    # 4. Update the Peer State to trigger the TUI Sidebar update
-                    asyncio.create_task(
-                        app.node.peer_states.update_state(peer_id, PeerState.CONNECTING)
-                    )
+                result = await app.node.add_contact_from_invite(cmd)
+                ep_str = f"{result.endpoint[0]}:{result.endpoint[1]}" if result.endpoint else "No endpoint"
+                conn_msg = "Connecting..." if result.connection_started else "Queued (no endpoint)"
 
                 out.update(
-                    f"[OK] Contact Added to Address Book!\n"
-                    f"ID: {peer_id.hex()[:8]}\n"
-                    f"Endpoint: {ep_str}\n\n"
+                    f"[OK] Contact Added!\n"
+                    f"ID: {result.peer_id.hex()[:8]}\n"
+                    f"Endpoint: {ep_str}\n"
+                    f"Status: {conn_msg}\n\n"
                     f"Press Enter to return."
                 )
+
+                # Refresh the sidebar
+                if hasattr(app, "refresh_peers_from_node"):
+                    await app.refresh_peers_from_node()
+
+            except ValueError as e:
+                out.update(f"[ERR] {e}\n\nPress Enter to return.")
             except Exception as e:
                 out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
             self._state = "WAIT"

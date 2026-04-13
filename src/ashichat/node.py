@@ -82,7 +82,7 @@ class Node:
 
         self._transport_obj: asyncio.DatagramTransport | None = None
         self._running = False
-        self._pending_hello_by_addr: dict[tuple[str, int], object] = {}
+        self._pending_hello_by_peer: dict[bytes, object] = {}
 
     # -- Event registration --------------------------------------------------
 
@@ -235,6 +235,28 @@ class Node:
         remote_pub = Ed25519PublicKey.from_public_bytes(hello.identity_public_key)
         remote_peer_id = derive_peer_id(remote_pub)
 
+        # Simultaneous HELLO guard: if we already have a session with this
+        # peer, skip.  If we both sent HELLO at the same time, the node with
+        # the *lower* peer_id yields (does not process the incoming HELLO) and
+        # instead waits for its own HELLO_ACK to arrive.
+        existing = self.session_registry.get_by_peer_id(remote_peer_id)
+        if existing is not None:
+            log.info("Already have session with %s — ignoring HELLO", remote_peer_id.hex()[:8])
+            return
+
+        if remote_peer_id in self._pending_hello_by_peer:
+            # Both sides sent HELLO simultaneously.  Tiebreak: lower peer_id
+            # becomes the initiator (waits for ACK), higher peer_id responds.
+            if self.identity.peer_id < remote_peer_id:
+                log.info("Simultaneous HELLO with %s — we have lower ID, staying initiator",
+                         remote_peer_id.hex()[:8])
+                return
+            else:
+                # We yield our initiator role; process their HELLO as receiver.
+                self._pending_hello_by_peer.pop(remote_peer_id, None)
+                log.info("Simultaneous HELLO with %s — we yield initiator role",
+                         remote_peer_id.hex()[:8])
+
         # Auto-trust peers that can complete a valid invite-derived handshake.
         # This enables reciprocal contact creation on first connect.
         if remote_peer_id not in self.peer_table.get_direct_peer_ids():
@@ -285,8 +307,19 @@ class Node:
         log.info("Session established with %s (receiver)", keys.remote_peer_id.hex()[:8])
 
     async def _handle_hello_ack(self, packet: Packet, addr: tuple[str, int]) -> None:
-        state = self._pending_hello_by_addr.pop(addr, None)
+        # Derive remote peer_id from the ACK payload to do a NAT-safe lookup.
+        ack_preview = HelloAckPayload.deserialize(packet.payload)
+        remote_pub = Ed25519PublicKey.from_public_bytes(ack_preview.identity_public_key)
+        remote_peer_id = derive_peer_id(remote_pub)
+
+        state = self._pending_hello_by_peer.pop(remote_peer_id, None)
         if state is None:
+            log.debug("No pending HELLO for peer %s — ignoring HELLO_ACK", remote_peer_id.hex()[:8])
+            return
+
+        # If we already got a session (e.g. from simultaneous HELLO), skip.
+        if self.session_registry.get_by_peer_id(remote_peer_id) is not None:
+            log.info("Already have session with %s — ignoring HELLO_ACK", remote_peer_id.hex()[:8])
             return
 
         known = self.peer_table.get_direct_peer_ids()
@@ -458,10 +491,13 @@ class Node:
             return
         if self.session_registry.get_by_peer_id(peer_id) is not None:
             return
+        # Don't send duplicate HELLOs
+        if peer_id in self._pending_hello_by_peer:
+            return
 
         hello_pkt, state = create_hello(self.identity)
         state.target_peer_id = peer_id
-        self._pending_hello_by_addr[endpoint] = state
+        self._pending_hello_by_peer[peer_id] = state
         await self.storage.remember_endpoint(peer_id, endpoint)
         if self.peer_table:
             entry = self.peer_table.get_entry(peer_id)
@@ -544,19 +580,33 @@ class Node:
                 log.exception("Peer list callback error")
 
     async def _mark_peer_connected(self, peer_id: bytes) -> None:
+        """Move a peer to CONNECTED, handling any prior state gracefully."""
         current = self.peer_states.get_state(peer_id)
         if current == PeerState.CONNECTED:
             return
-        if current == PeerState.DISCONNECTED:
-            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
-        elif current == PeerState.ARCHIVED:
-            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
-        elif current == PeerState.RESOLVING:
-            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
-        elif current == PeerState.FAILED:
-            await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
-            await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
-        await self.peer_states.update_state(peer_id, PeerState.CONNECTED)
+        try:
+            if current == PeerState.DISCONNECTED:
+                await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+            elif current == PeerState.ARCHIVED:
+                await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+            elif current == PeerState.RESOLVING:
+                await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+            elif current == PeerState.FAILED:
+                await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
+                await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
+            # Now transition CONNECTING -> CONNECTED
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTED)
+        except ValueError:
+            log.warning(
+                "State transition error for %s (current=%s) — forcing CONNECTED",
+                peer_id.hex()[:8], current.value,
+            )
+            # Force the state machine to CONNECTED by resetting it
+            machine = self.peer_states.ensure_machine(peer_id)
+            machine._state = PeerState.CONNECTING
+            machine._last_change = __import__('time').time()
+            await self.peer_states.update_state(peer_id, PeerState.CONNECTED)
+        self._notify_peers_changed()
 
 
 def _parse_endpoint(ep: str) -> tuple[str, int] | None:
