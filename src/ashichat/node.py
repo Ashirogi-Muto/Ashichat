@@ -79,10 +79,12 @@ class Node:
         self._on_message_received: list[Callable] = []
         self._on_peer_state_changed: list[Callable] = []
         self._on_peers_changed: list[Callable[[], None]] = []
+        self._on_connection_event: list[Callable[[str], None]] = []
 
         self._transport_obj: asyncio.DatagramTransport | None = None
         self._running = False
         self._pending_hello_by_peer: dict[bytes, object] = {}
+        self._hello_retry_tasks: dict[bytes, asyncio.Task] = {}
 
     # -- Event registration --------------------------------------------------
 
@@ -97,6 +99,10 @@ class Node:
 
     def on_peers_changed(self, callback: Callable[[], None]) -> None:
         self._on_peers_changed.append(callback)
+
+    def on_connection_event(self, callback: Callable[[str], None]) -> None:
+        """Register callback for connection status messages (for UI feedback)."""
+        self._on_connection_event.append(callback)
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -208,6 +214,7 @@ class Node:
 
     async def handle_packet(self, packet: Packet, addr: tuple[str, int]) -> None:
         """Central packet dispatcher."""
+        log.debug("Received %s from %s:%d", packet.packet_type.name, addr[0], addr[1])
         handlers = {
             PacketType.HELLO: self._handle_hello,
             PacketType.HELLO_ACK: self._handle_hello_ack,
@@ -304,6 +311,9 @@ class Node:
         self.heartbeat.register_peer(keys.remote_peer_id, keys.session_id, addr)
         await self.heartbeat.start_heartbeat(keys.remote_peer_id)
         await self._flush_queued_for_peer(keys.remote_peer_id)
+        self._notify_connection_event(
+            f"Session established with {keys.remote_peer_id.hex()[:8]} (receiver)"
+        )
         log.info("Session established with %s (receiver)", keys.remote_peer_id.hex()[:8])
 
     async def _handle_hello_ack(self, packet: Packet, addr: tuple[str, int]) -> None:
@@ -314,7 +324,7 @@ class Node:
 
         state = self._pending_hello_by_peer.pop(remote_peer_id, None)
         if state is None:
-            log.debug("No pending HELLO for peer %s — ignoring HELLO_ACK", remote_peer_id.hex()[:8])
+            log.warning("No pending HELLO for peer %s — ignoring HELLO_ACK", remote_peer_id.hex()[:8])
             return
 
         # If we already got a session (e.g. from simultaneous HELLO), skip.
@@ -348,6 +358,13 @@ class Node:
         self.heartbeat.register_peer(keys.remote_peer_id, keys.session_id, addr)
         await self.heartbeat.start_heartbeat(keys.remote_peer_id)
         await self._flush_queued_for_peer(keys.remote_peer_id)
+        # Cancel retry task since we got the ACK
+        retry = self._hello_retry_tasks.pop(keys.remote_peer_id, None)
+        if retry and not retry.done():
+            retry.cancel()
+        self._notify_connection_event(
+            f"Session established with {keys.remote_peer_id.hex()[:8]} (initiator)"
+        )
         log.info("Session established with %s (initiator)", keys.remote_peer_id.hex()[:8])
 
     async def _handle_data(self, packet: Packet, addr: tuple[str, int]) -> None:
@@ -486,13 +503,16 @@ class Node:
         )
 
     async def connect_to_peer(self, peer_id: bytes, endpoint: tuple[str, int]) -> None:
-        """Initiate HELLO to peer endpoint."""
+        """Initiate HELLO to peer endpoint with retry."""
         if self.identity is None or self.transport is None:
+            log.warning("Cannot connect — node not fully started")
             return
         if self.session_registry.get_by_peer_id(peer_id) is not None:
+            log.info("Already connected to %s", peer_id.hex()[:8])
             return
         # Don't send duplicate HELLOs
         if peer_id in self._pending_hello_by_peer:
+            log.info("Already have pending HELLO for %s", peer_id.hex()[:8])
             return
 
         hello_pkt, state = create_hello(self.identity)
@@ -507,7 +527,48 @@ class Node:
             await self.peer_states.update_state(peer_id, PeerState.CONNECTING)
         except ValueError:
             pass
+
+        # Send first HELLO immediately, then launch retry task
         self._send_to(hello_pkt, endpoint)
+        log.info("HELLO sent to %s at %s:%d (attempt 1)", peer_id.hex()[:8], endpoint[0], endpoint[1])
+        self._notify_connection_event(
+            f"Sending HELLO to {peer_id.hex()[:8]} at {endpoint[0]}:{endpoint[1]}..."
+        )
+
+        # Background retry task
+        async def _retry_hello():
+            try:
+                for attempt in range(2, 8):  # attempts 2-7 (total 7 including the first)
+                    await asyncio.sleep(3)
+                    # Stop if session was established or state consumed
+                    if self.session_registry.get_by_peer_id(peer_id) is not None:
+                        return
+                    if peer_id not in self._pending_hello_by_peer:
+                        return
+                    self._send_to(hello_pkt, endpoint)
+                    log.info("HELLO retry to %s (attempt %d/7)", peer_id.hex()[:8], attempt)
+                    self._notify_connection_event(
+                        f"HELLO retry {attempt}/7 to {peer_id.hex()[:8]}..."
+                    )
+                # All retries exhausted
+                if self.session_registry.get_by_peer_id(peer_id) is None:
+                    self._pending_hello_by_peer.pop(peer_id, None)
+                    log.warning("HELLO to %s timed out after 7 attempts", peer_id.hex()[:8])
+                    self._notify_connection_event(
+                        f"Connection to {peer_id.hex()[:8]} failed — no response after 7 attempts."
+                    )
+                    try:
+                        await self.peer_states.update_state(peer_id, PeerState.DISCONNECTED)
+                    except ValueError:
+                        pass
+            except asyncio.CancelledError:
+                pass
+
+        # Cancel any existing retry for this peer
+        old_task = self._hello_retry_tasks.pop(peer_id, None)
+        if old_task and not old_task.done():
+            old_task.cancel()
+        self._hello_retry_tasks[peer_id] = asyncio.create_task(_retry_hello())
 
     async def _flush_queued_for_peer(self, peer_id: bytes) -> None:
         """Send queued messages immediately once a session exists."""
@@ -578,6 +639,14 @@ class Node:
                 cb()
             except Exception:
                 log.exception("Peer list callback error")
+
+    def _notify_connection_event(self, message: str) -> None:
+        """Push a connection status message to UI listeners."""
+        for cb in self._on_connection_event:
+            try:
+                cb(message)
+            except Exception:
+                log.exception("Connection event callback error")
 
     async def _mark_peer_connected(self, peer_id: bytes) -> None:
         """Move a peer to CONNECTED, handling any prior state gracefully."""

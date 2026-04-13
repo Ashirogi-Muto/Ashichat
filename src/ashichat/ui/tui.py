@@ -55,6 +55,7 @@ class AshiChatApp(App):
             self.node.on_message_received(self._handle_incoming)
             self.node.on_peer_state_changed(self._handle_state_change)
             self.node.on_peers_changed(self._handle_peers_changed)
+            self.node.on_connection_event(self._handle_connection_event)
             await self.refresh_peers_from_node()
         else:
             self._chatview_ref.add_system_message("Node not attached.")
@@ -78,6 +79,12 @@ class AshiChatApp(App):
 
     def _handle_peers_changed(self) -> None:
         self.call_from_thread(self._schedule_peer_refresh)
+
+    def _handle_connection_event(self, message: str) -> None:
+        self.call_from_thread(self._do_handle_connection_event, message)
+
+    def _do_handle_connection_event(self, message: str) -> None:
+        self._chatview_ref.add_system_message(message)
 
     def _schedule_peer_refresh(self) -> None:
         if not self.node:
@@ -160,6 +167,8 @@ class AshiChatApp(App):
             self.exit()
             return
 
-        should_quit = await self.push_screen_wait(QuitConfirmDialog(undelivered))
-        if should_quit:
-            self.exit()
+        def on_quit_result(should_quit) -> None:
+            if should_quit:
+                self.exit()
+
+        self.push_screen(QuitConfirmDialog(undelivered), callback=on_quit_result)
