@@ -490,10 +490,6 @@ class InviteDialog(ModalScreen):
                     f"Press Enter to return."
                 )
 
-                # Refresh the sidebar
-                if hasattr(app, "refresh_peers_from_node"):
-                    await app.refresh_peers_from_node()
-
             except ValueError as e:
                 out.update(f"[ERR] {e}\n\nPress Enter to return.")
             except Exception as e:
