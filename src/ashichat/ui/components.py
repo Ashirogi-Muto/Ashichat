@@ -308,52 +308,41 @@ class MessageInput(Widget):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         cmd = event.value.strip()
-        event.input.value = ""
+        
+        # Don't clear the input value here anymore, so we can pre-fill it in the CONFIRM_IP state
         out = self.query_one("#cli-output", Static)
 
         if self._state == "MENU":
+            event.input.value = "" # Clear menu selection
             if cmd == "1":
                 app = self.app
                 if hasattr(app, "node") and app.node and app.node.identity:
-                    # Update UI so the user knows we are reaching out to the internet
-                    out.update("--- Generate Invite ---\n\nDiscovering Public IP... Please wait.")
+                    out.update("--- Generate Invite ---\n\nDetecting Public IP... Please wait.")
                     self._state = "FETCHING"
                     
-                    # Safe, non-blocking IP fetcher
                     def fetch_ip():
                         import urllib.request
                         try:
-                            # 3-second timeout so the app never hangs indefinitely
                             req = urllib.request.urlopen('https://api.ipify.org', timeout=3)
                             return req.read().decode('utf-8').strip()
                         except Exception:
-                            return None
+                            return ""
 
-                    # Run the HTTP request in a background thread
                     import asyncio
                     ip = await asyncio.to_thread(fetch_ip)
                     
-                    # Grab the port from your local node config
-                    port = app.node.config.network.udp_port
-                    endpoint = (ip, port) if ip else None
-
-                    try:
-                        from ashichat.invite import generate_invite, generate_invite_readable
-                        c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint)
-                        c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint)
-                        
-                        ip_display = ip if ip else "Failed to discover IP (NAT restricted)"
-                        out.update(
-                            f"--- Generated Invite ---\n\n"
-                            f"Public Endpoint: {ip_display}:{port}\n\n"
-                            f"Base85:\n{c85}\n\n"
-                            f"Base32:\n{c32}\n\n"
-                            f"Press Enter to return."
-                        )
-                    except Exception as e:
-                        out.update(f"[ERR] Failed to generate invite: {e}\n\nPress Enter to return.")
-                        
-                    self._state = "WAIT"
+                    # NEW LOGIC: Pre-fill the input box and ask the user to confirm!
+                    out.update(
+                        f"--- Confirm Endpoint IP ---\n\n"
+                        f"Detected IP: {ip if ip else 'None'}\n\n"
+                        f"NOTE: If you are on a cloud server (OCI, AWS), this detected IP might be an outbound NAT address. "
+                        f"If so, replace it below with your server's actual assigned Public IP.\n\n"
+                        f"Press Enter to confirm and generate."
+                    )
+                    
+                    # Pre-fill the text box for the user
+                    event.input.value = ip
+                    self._state = "CONFIRM_IP"
                 else:
                     out.update("Error: Node not running.\n\nPress Enter to return.")
                     self._state = "WAIT"
@@ -366,11 +355,39 @@ class MessageInput(Widget):
             else:
                 out.update(self._get_menu_text() + f"\n\n[!] Invalid option: '{cmd}'")
 
+        # NEW STATE: The user has pressed Enter on the pre-filled IP box
+        elif self._state == "CONFIRM_IP":
+            event.input.value = "" # Clear it now that we've read it
+            ip = cmd 
+            app = self.app
+            port = app.node.config.network.udp_port
+            endpoint = (ip, port) if ip else None
+
+            try:
+                from ashichat.invite import generate_invite, generate_invite_readable
+                c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint)
+                c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint)
+                
+                ip_display = ip if ip else "None (NAT Restricted)"
+                out.update(
+                    f"--- Generated Invite ---\n\n"
+                    f"Endpoint: {ip_display}:{port}\n\n"
+                    f"Base85:\n{c85}\n\n"
+                    f"Base32:\n{c32}\n\n"
+                    f"Press Enter to return."
+                )
+            except Exception as e:
+                out.update(f"[ERR] Failed to generate invite: {e}\n\nPress Enter to return.")
+                
+            self._state = "WAIT"
+
         elif self._state == "WAIT":
+            event.input.value = ""
             out.update(self._get_menu_text())
             self._state = "MENU"
 
         elif self._state == "ACCEPT":
+            event.input.value = ""
             if not cmd:
                 out.update(self._get_menu_text())
                 self._state = "MENU"
@@ -387,25 +404,20 @@ class MessageInput(Widget):
                     f"Endpoint: {ep_str}\n\n"
                     f"Press Enter to return."
                 )
-                
-                # NOTE: To actually connect, you will eventually want to do something like:
-                # app.node.peer_table.add_direct_peer(derive_peer_id(data.public_key), data.public_key, "New Peer", data.endpoint)
-                # app.node.reconnect.trigger_reconnect(derive_peer_id(data.public_key))
-                
             except Exception as e:
                 out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
             self._state = "WAIT"
 
 
 class InviteDialog(ModalScreen):
-    """Pure CLI-style screen for invites."""
+    """Pure CLI-style screen for Invites."""
 
     DEFAULT_CSS = """
     InviteDialog {
         align: center middle;
     }
     #invite-container {
-        width: 70;
+        width: 60;
         height: 20;
         background: #000000;
         border: none;
@@ -443,33 +455,49 @@ class InviteDialog(ModalScreen):
 
     def on_mount(self) -> None:
         self._state = "MENU"
-        self.query_one("#cli-input", Input).focus()
+        self.query_one("#cli-input").focus()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         cmd = event.value.strip()
-        event.input.value = ""
+        
+        # Don't clear the input value here anymore, so we can pre-fill it in the CONFIRM_IP state
         out = self.query_one("#cli-output", Static)
 
         if self._state == "MENU":
+            event.input.value = "" # Clear menu selection
             if cmd == "1":
                 app = self.app
                 if hasattr(app, "node") and app.node and app.node.identity:
-                    from ashichat.invite import generate_invite, generate_invite_readable
+                    out.update("--- Generate Invite ---\n\nDetecting Public IP... Please wait.")
+                    self._state = "FETCHING"
+                    
+                    def fetch_ip():
+                        import urllib.request
+                        try:
+                            req = urllib.request.urlopen('https://api.ipify.org', timeout=3)
+                            return req.read().decode('utf-8').strip()
+                        except Exception:
+                            return ""
 
-                    endpoint_hint = _guess_local_endpoint(app)
-                    c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint_hint)
-                    c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint_hint)
-                    endpoint_note = (
-                        f"\nEndpoint hint: {endpoint_hint[0]}:{endpoint_hint[1]}"
-                        if endpoint_hint
-                        else "\nEndpoint hint: unavailable"
-                    )
+                    import asyncio
+                    ip = await asyncio.to_thread(fetch_ip)
+                    
+                    # NEW LOGIC: Pre-fill the input box and ask the user to confirm!
                     out.update(
-                        f"--- Generated Invite ---\n\nBase85:\n{c85}\n\nBase32:\n{c32}\n{endpoint_note}\n\nPress Enter to return."
+                        f"--- Confirm Endpoint IP ---\n\n"
+                        f"Detected IP: {ip if ip else 'None'}\n\n"
+                        f"NOTE: If you are on a cloud server (OCI, AWS), this detected IP might be an outbound NAT address. "
+                        f"If so, replace it below with your server's actual assigned Public IP.\n\n"
+                        f"Press Enter to confirm and generate."
                     )
+                    
+                    # Pre-fill the text box for the user
+                    event.input.value = ip
+                    self._state = "CONFIRM_IP"
                 else:
                     out.update("Error: Node not running.\n\nPress Enter to return.")
-                self._state = "WAIT"
+                    self._state = "WAIT"
+                    
             elif cmd == "2":
                 out.update("--- Accept Invite ---\n\nPaste the invite code and press Enter:")
                 self._state = "ACCEPT"
@@ -478,46 +506,57 @@ class InviteDialog(ModalScreen):
             else:
                 out.update(self._get_menu_text() + f"\n\n[!] Invalid option: '{cmd}'")
 
+        elif self._state == "CONFIRM_IP":
+            event.input.value = "" # Clear it now that we've read it
+            ip = cmd 
+            app = self.app
+            port = app.node.config.network.udp_port
+            endpoint = (ip, port) if ip else None
+
+            try:
+                from ashichat.invite import generate_invite, generate_invite_readable
+                c85 = generate_invite(app.node.identity.public_key, endpoint=endpoint)
+                c32 = generate_invite_readable(app.node.identity.public_key, endpoint=endpoint)
+                
+                ip_display = ip if ip else "None (NAT Restricted)"
+                out.update(
+                    f"--- Generated Invite ---\n\n"
+                    f"Endpoint: {ip_display}:{port}\n\n"
+                    f"Base85:\n{c85}\n\n"
+                    f"Base32:\n{c32}\n\n"
+                    f"Press Enter to return."
+                )
+            except Exception as e:
+                out.update(f"[ERR] Failed to generate invite: {e}\n\nPress Enter to return.")
+                
+            self._state = "WAIT"
+
         elif self._state == "WAIT":
+            event.input.value = ""
             out.update(self._get_menu_text())
             self._state = "MENU"
 
         elif self._state == "ACCEPT":
+            event.input.value = ""
             if not cmd:
                 out.update(self._get_menu_text())
                 self._state = "MENU"
                 return
-
+                
             try:
-                app = self.app
-                if not (hasattr(app, "node") and app.node and app.node.identity):
-                    out.update("[ERR] Node not running.\n\nPress Enter to return.")
-                    self._state = "WAIT"
-                    return
-
-                result = await app.node.add_contact_from_invite(cmd)
-                if hasattr(app, "refresh_peers_from_node"):
-                    await app.refresh_peers_from_node()
-                try:
-                    sidebar = app.query_one("#sidebar", Sidebar)
-                    sidebar.set_active_peer(result.peer_id)
-                    chat = app.query_one("#chat-view", ChatView)
-                    chat.set_active_peer(result.peer_id, sidebar.get_active_peer_name())
-                except Exception:
-                    pass
-
-                immediate = (
-                    "Connection attempt started."
-                    if result.connection_started
-                    else "No endpoint hint in invite; waiting for manual/overlay discovery."
-                )
+                from ashichat.invite import parse_invite
+                data = parse_invite(cmd)
+                
+                ep_str = f"{data.endpoint[0]}:{data.endpoint[1]}" if data.endpoint else "No IP found"
                 out.update(
-                    f"[OK] Contact added!\nPeer: {result.peer_id.hex()[:8]}\n{immediate}\n\nPress Enter to return."
+                    f"[OK] Invite parsed!\n"
+                    f"Key: {data.public_key.public_bytes_raw().hex()[:16]}...\n"
+                    f"Endpoint: {ep_str}\n\n"
+                    f"Press Enter to return."
                 )
             except Exception as e:
-                out.update(f"[ERR] Invite accept failed: {e}\n\nPress Enter to return.")
+                out.update(f"[ERR] Invalid Code: {e}\n\nPress Enter to return.")
             self._state = "WAIT"
-
 
 class ProfileDialog(ModalScreen):
     """CLI-style profile screen."""
