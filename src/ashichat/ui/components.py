@@ -173,15 +173,12 @@ class Sidebar(Widget):
         self._refresh_list()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
-        item_id = event.item.id or ""
-        if not item_id.startswith("peer-"):
-            return
-        try:
-            peer_id = bytes.fromhex(item_id[len("peer-") :])
-        except ValueError:
-            return
-        self.set_active_peer(peer_id)
-        self.post_message(self.PeerSelected(peer_id))
+        lv = self.query_one("#contact-list", ListView)
+        idx = lv.index
+        if idx is not None and 0 <= idx < len(self._visible_ids):
+            peer_id = self._visible_ids[idx]
+            self.set_active_peer(peer_id)
+            self.post_message(self.PeerSelected(peer_id))
 
     def _sorted_peer_ids(self) -> list[bytes]:
         items = list(self._peers.items())
@@ -210,13 +207,13 @@ class Sidebar(Widget):
                 active = " >" if pid == self._active_peer_id else "  "
                 archived = " [A]" if info.get("archived") else ""
                 label = f"{active}{icon}{name}{unread}{archived}"
-                lv.append(ListItem(Label(label), id=f"peer-{pid.hex()}"))
+                lv.append(ListItem(Label(label)))
                 self._visible_ids.append(pid)
 
             if self._active_peer_id in self._visible_ids:
                 lv.index = self._visible_ids.index(self._active_peer_id)
         except Exception:
-            pass
+            log.exception("_refresh_list failed")
 
 
 class ChatView(Widget):

@@ -45,11 +45,23 @@ Sidebar {
 
 #contact-list > ListItem {
     padding: 0 1;
-    height: 1;
+    height: auto;
+    color: #cccccc;
+    background: #000000;
+}
+
+#contact-list > ListItem > Label {
+    color: #cccccc;
+    width: 100%;
 }
 
 #contact-list > ListItem:hover {
     background: #222222;
+}
+
+#contact-list > .--highlight {
+    background: #1a1a2e;
+    color: #ffffff;
 }
 
 /* Chat view */
