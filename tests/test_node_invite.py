@@ -18,6 +18,14 @@ from ashichat.invite import (
     parse_invite,
 )
 from ashichat.node import Node
+from ashichat.overlay import PeerTable
+from ashichat.packet import (
+    EndpointUpdatePayload,
+    Packet,
+    PacketType,
+    ResolveRequestPayload,
+)
+from ashichat.session import Session
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -266,6 +274,172 @@ class TestNode:
         finally:
             await alice.stop()
             await bob.stop()
+
+    async def test_resolve_request_uses_cached_signed_endpoint_update(
+        self, tmp_path: Path
+    ) -> None:
+        node = Node(self._make_config(tmp_path, port=0))
+        node.identity = generate_identity()
+        node.peer_table = PeerTable(node.identity.peer_id)
+
+        remote = generate_identity()
+        node.peer_table.add_direct_peer(
+            remote.peer_id,
+            remote.public_key_bytes,
+            endpoint=("10.0.0.9", 9100),
+        )
+        entry = node.peer_table.get_entry(remote.peer_id)
+        assert entry is not None
+        entry.version_counter = 7
+        entry.endpoint_signature = b"\x55" * 64
+
+        sent: list = []
+        node._send_to = lambda packet, addr: sent.append((packet, addr))
+
+        req = ResolveRequestPayload(
+            request_id=os.urandom(16),
+            target_peer_id=remote.peer_id,
+            ttl=5,
+        )
+        await node._handle_resolve_request(
+            Packet(version=0x01, packet_type=PacketType.RESOLVE_REQUEST, payload=req.serialize()),
+            ("127.0.0.1", 9999),
+        )
+
+        assert len(sent) == 1
+        pkt, addr = sent[0]
+        assert addr == ("127.0.0.1", 9999)
+        assert pkt.packet_type == PacketType.ENDPOINT_UPDATE
+        update = EndpointUpdatePayload.deserialize(pkt.payload)
+        assert update.peer_id == remote.peer_id
+        assert update.endpoint_ip == "10.0.0.9"
+        assert update.endpoint_port == 9100
+        assert update.version_counter == 7
+        assert update.signature == b"\x55" * 64
+
+    async def test_build_endpoint_update_uses_monotonic_local_version(
+        self, tmp_path: Path
+    ) -> None:
+        node = Node(self._make_config(tmp_path, port=0))
+        await node.start()
+        try:
+            pkt1 = node._build_endpoint_update(("127.0.0.1", 9001))
+            pkt2 = node._build_endpoint_update(("127.0.0.1", 9002))
+            await asyncio.sleep(0)
+
+            assert pkt1 is not None
+            assert pkt2 is not None
+
+            update1 = EndpointUpdatePayload.deserialize(pkt1.payload)
+            update2 = EndpointUpdatePayload.deserialize(pkt2.payload)
+            assert update1.version_counter == 1
+            assert update2.version_counter == 2
+            assert await node.storage.get_local_endpoint_version() == 2
+        finally:
+            await node.stop()
+
+    async def test_reconnect_falls_back_to_resolution_after_failed_attempts(
+        self, tmp_path: Path
+    ) -> None:
+        node = Node(self._make_config(tmp_path, port=0))
+        node.identity = generate_identity()
+        node.peer_table = PeerTable(node.identity.peer_id)
+
+        remote = generate_identity()
+        node.peer_table.add_direct_peer(
+            remote.peer_id,
+            remote.public_key_bytes,
+            endpoint=("10.0.0.5", 9000),
+        )
+
+        calls: list[tuple[str, object]] = []
+
+        class FakeResolver:
+            async def resolve_peer(self, peer_id, *, force_network=False):
+                calls.append(("resolve", force_network))
+                return ("10.0.0.99", 9010)
+
+        async def fake_connect(peer_id: bytes, endpoint: tuple[str, int]) -> None:
+            calls.append(("connect", endpoint))
+
+        node.resolver = FakeResolver()
+        node.connect_to_peer = fake_connect  # type: ignore[method-assign]
+        async def fake_remember_endpoint(peer_id: bytes, endpoint: tuple[str, int]) -> None:
+            return None
+        node.storage.remember_endpoint = fake_remember_endpoint  # type: ignore[method-assign]
+        node.reconnect.record_disconnect(remote.peer_id)
+        node.reconnect.record_attempt(remote.peer_id)
+
+        await node._reconnect_peer(remote.peer_id)
+
+        assert ("resolve", True) in calls
+        assert ("connect", ("10.0.0.99", 9010)) in calls
+        assert node.peer_table.get_endpoint(remote.peer_id) == ("10.0.0.99", 9010)
+
+    async def test_queued_message_payload_lives_in_encrypted_outbox_not_sqlite(
+        self, tmp_path: Path
+    ) -> None:
+        node = Node(self._make_config(tmp_path, port=0))
+        await node.start()
+        try:
+            remote = generate_identity()
+            await node.storage.add_peer(remote.peer_id, remote.public_key_bytes)
+            node.peer_table.add_direct_peer(remote.peer_id, remote.public_key_bytes)
+
+            msg_id = await node.send_message(remote.peer_id, "store me safely")
+            assert msg_id is not None
+
+            queued = await node.storage.load_all_queued_messages()
+            record = next(q for q in queued if q.message_id == msg_id)
+            assert record.plaintext == b""
+
+            assert node.outbox is not None
+            recovered = await node.outbox.load_message(msg_id)
+            assert recovered == b"store me safely"
+
+            outbox_blob = (tmp_path / "data" / "outbox" / f"{msg_id}.bin").read_bytes()
+            assert b"store me safely" not in outbox_blob
+        finally:
+            await node.stop()
+
+    async def test_sent_message_sequence_and_payload_survive_restart(
+        self, tmp_path: Path
+    ) -> None:
+        config = self._make_config(tmp_path, port=0)
+        remote = generate_identity()
+
+        node1 = Node(config)
+        await node1.start()
+        try:
+            await node1.storage.add_peer(remote.peer_id, remote.public_key_bytes, endpoint=("127.0.0.1", 9009))
+            node1.peer_table.add_direct_peer(
+                remote.peer_id,
+                remote.public_key_bytes,
+                endpoint=("127.0.0.1", 9009),
+            )
+            node1.session_registry.register(
+                Session(
+                    session_id=b"\x11" * 8,
+                    encryption_key=os.urandom(32),
+                    remote_peer_id=remote.peer_id,
+                )
+            )
+
+            msg_id = await node1.send_message(remote.peer_id, "restart sync seed")
+            assert msg_id is not None
+            seq1 = node1.queue_manager._queue[msg_id]["sequence_number"]
+            assert seq1 is not None
+        finally:
+            await node1.stop()
+
+        node2 = Node(config)
+        await node2.start()
+        try:
+            restored = node2.queue_manager._queue[msg_id]
+            assert restored["sequence_number"] == seq1
+            assert restored["plaintext"] == b"restart sync seed"
+        finally:
+            await node2.stop()
 
 
 async def _wait_for(predicate, timeout: float = 2.0) -> None:

@@ -48,6 +48,8 @@ class PacketType(IntEnum):
     RESOLVE_REQUEST = 0x06
     PING = 0x07
     PONG = 0x08
+    SYNC = 0x09
+    APP_ACK = 0x0A
 
 
 _VALID_TYPES = set(PacketType)
@@ -370,6 +372,50 @@ class PongPayload:
         return cls(session_id=data[0:8], ping_id=data[8:16])
 
 
+@dataclass
+class SyncPayload:
+    """SYNC payload — I_HAVE_UP_TO(sequence_number) for chat synchronization."""
+
+    session_id: bytes  # 8
+    sequence_number: int  # 4 (highest sequence we've received)
+
+    _SIZE = 12
+
+    def serialize(self) -> bytes:
+        return self.session_id + struct.pack(">I", self.sequence_number)
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> SyncPayload:
+        if len(data) < cls._SIZE:
+            raise PacketError(f"SyncPayload too short: {len(data)} < {cls._SIZE}")
+        return cls(
+            session_id=data[0:8],
+            sequence_number=struct.unpack(">I", data[8:12])[0],
+        )
+
+
+@dataclass
+class AppAckPayload:
+    """APP_ACK payload — application-level acknowledgement (message displayed)."""
+
+    session_id: bytes  # 8
+    ack_sequence_number: int  # 4
+
+    _SIZE = 12
+
+    def serialize(self) -> bytes:
+        return self.session_id + struct.pack(">I", self.ack_sequence_number)
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> AppAckPayload:
+        if len(data) < cls._SIZE:
+            raise PacketError(f"AppAckPayload too short: {len(data)} < {cls._SIZE}")
+        return cls(
+            session_id=data[0:8],
+            ack_sequence_number=struct.unpack(">I", data[8:12])[0],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helper: wrap a typed payload into a Packet
 # ---------------------------------------------------------------------------
@@ -385,6 +431,8 @@ def make_packet(
         | ResolveRequestPayload
         | PingPayload
         | PongPayload
+        | SyncPayload
+        | AppAckPayload
     ),
 ) -> Packet:
     """Convenience: build a ``Packet`` from a typed payload."""
