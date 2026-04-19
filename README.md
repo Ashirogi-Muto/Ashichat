@@ -1,73 +1,146 @@
 # AshiChat
 
-AshiChat is a decentralized, invite-only, serverless, peer-to-peer encrypted terminal messaging system built in Python. It is designed for users who prioritize privacy, sovereignty, and direct connections over convenience or global discoverability.
+AshiChat is a decentralized, invite-only, identity-based, peer-to-peer encrypted terminal messaging protocol and client. It is designed to operate without centralized bootstrap servers, global discovery, or mandatory relays, prioritizing privacy, scalability, and explicit engineering tradeoffs over guaranteed global reachability.
 
 ## Core Philosophy
 
-Unlike mainstream messaging platforms, AshiChat has **zero central servers**. There is no global directory, and no way to search for users. 
-- **Strictly Private:** Connect only via cryptographic invites.
-- **Serverless:** The network is formed purely by the mesh of connected peers.
-- **Trust-Based:** Strict mutual authentication with no Trust-On-First-Use (TOFU).
-- **Local-First:** All data lives on your device, with messages end-to-end encrypted and stored locally.
+AshiChat operates on a strict trust and privacy model:
+* **No Unsolicited Messaging:** You can only communicate with peers who have explicitly invited you.
+* **No Global Directory:** There is no public phone book, search function, or global peer discovery.
+* **Serverless Operation:** The network is formed purely by the mesh of connected peers without centralized bootstrap dependencies.
+* **Strictly Authenticated:** The system enforces strict mutual authentication with no Trust-On-First-Use (TOFU).
 
-## Key Features
+## Architecture & Protocol Stack
 
-- **Strong Cryptography:** Ed25519 for Identity, X25519 + HKDF-SHA256 + AES-256-GCM for Perfect Forward Secrecy messaging.
-- **P2P Mesh Network:** Uses custom binary framing over UDP, STUN-less UDP hole punching, and a bounded overlay network implementation for communication.
-- **Terminal UI:** Responsive and feature-rich TUI built on the `Textual` framework.
-- **Crash-Safe Storage:** SQLite backend for metadata and encrypted log files for message content, ensuring atomic writes.
-- **Offline Queue:** Messages are queued and retried automatically when a peer comes online (up to 7 days).
+AshiChat implements a custom minimal viable protocol stack built from scratch over raw UDP datagrams.
 
-## Installation and Usage (Plug and Play)
+### The Network Layers
+* **Layer 1: Primitives:** Ed25519 for long-term identity, X25519 for ephemeral key exchange, HKDF-SHA256 for key derivation, and AES-256-GCM for encryption.
+* **Layer 2: Wire Protocol:** A strict binary parser governing 8 distinct packet types (`HELLO`, `HELLO_ACK`, `DATA`, `ACK`, `ENDPOINT_UPDATE`, `RESOLVE_REQUEST`, `PING`, `PONG`). Any malformed packets or unsupported protocol versions are silently dropped.
+* **Layer 3: Authentication:** Handshakes require cryptographic verification of the peer's public key against a local known-peer list before session keys are derived.
+* **Layer 4: Transport & NAT Traversal:** Primarily operates over UDP with built-in STUN-less hole punching utilizing simultaneous packet bursts.
+* **Layer 5: Orchestration & Overlay:** Nodes maintain a bounded random rotating subset of active peers (max 50) for routing messages via a TTL-limited recursive resolution protocol, maintaining constant-size memory state regardless of network size.
+* **Layer 6: UI:** A responsive, modern Terminal User Interface built on the `Textual` framework.
 
-AshiChat is designed to be **completely zero-config and plug-and-play**. There are no databases to configure, no keys to manually generate, and no servers to set up.
+### Storage & Crash Consistency
+AshiChat enforces a local-first, offline-capable storage model:
+* **Metadata:** SQLite is used strictly for metadata such as peer lists, sequence numbers, and offline message queues.
+* **Encrypted Message Logs:** Messages are encrypted at rest using AES-256-GCM and stored in plain-file appended logs per peer (`~/.ashichat/messages/<peer_id>.log`).
+* **Atomicity:** Data integrity is guaranteed through atomic write processes (`fsync` and atomic renames) to prevent corruption during power failures.
 
-Upon first run, AshiChat will automatically:
-1. Generate an Ed25519 identity keypair (`~/.ashichat/identity/`).
-2. Create and migrate a local SQLite database for session state.
-3. Set up encrypted message log files (`~/.ashichat/messages/`).
+## Security Model
+
+* **Identity:** Peer identity is uniquely defined by an immutable Ed25519 keypair generated on first launch.
+* **Perfect Forward Secrecy:** Session keys are rotated upon every reconnection via a new handshake.
+* **Replay Protection:** Encrypted payloads include monotonic, session-specific sequence numbers. Packets with repeated or older sequence numbers are immediately rejected.
+* **Signed Endpoints:** IP endpoint updates propagated through the mesh are cryptographically signed using the peer's identity key and validated via monotonic version counters to prevent clock drift inconsistencies and spoofing.
+
+## Installation & Usage
+
+AshiChat is zero-config and plug-and-play. On the first run, it automatically generates keys, migrates local SQLite databases, and establishes encrypted log directories.
+
+### Prerequisites
+* Python 3.11+.
 
 ### Quick Start
-Requires **Python 3.11** or higher.
 
-1. **Install the package:**
+1.  **Install the application:**
     ```bash
     pip install .
     ```
-    *(For development, use `pip install -e ".[dev]"` instead)*.
+    *(For development, use `pip install -e ".[dev]"`)*
 
-2. **Run the application:**
+2.  **Launch the TUI:**
     ```bash
     ashichat
     ```
-    This launches the Terminal UI (TUI). 
 
-3. **Connect with peers:**
-    - Press `i` in the TUI to view your unique Invite Code.
-    - Share this code. When someone connects, AshiChat automatically performs mutual authentication, P2P hole-punching, and establishes an encrypted session.
+3.  **Connect:**
+    * Press `i` in the TUI to generate and view your unique Invite Code (format: `ashichat://v1:<base58_encoded_public_key>`).
+    * Share this code with a trusted contact. Connection, mutual authentication, and P2P hole-punching are handled automatically.
 
-## Project Structure
+---
 
-This project implements a custom minimal viable protocol stack built completely from scratch over raw UDP datagrams.
+## Network Configuration (Firewall Rules)
 
-* **Layer 1: Primitives** (`crypto.py`, `identity.py`): Provides keypairs, ECDH, shared secrets, nonces, HKDF derivation, and AEAD encryption.
-* **Layer 2: Wire Protocol** (`packet.py`): Extremely strict binary parser for our distinct packet types, dropping anything invalid.
-* **Layer 3: Authentication** (`handshake.py`, `session.py`): Strict mutual authentication logic enforcing cryptographic identities.
-* **Layer 4: Transport & Routing** (`transport_udp.py`, `nat.py`): Non-blocking sockets, adaptive retransmission, STUN-less UDP hole punching. 
-* **Layer 5: Orchestration** (`node.py`, `peer_state.py`, `heartbeat.py`): Connects sub-systems, supervises heartbeat, overlay routing, node states.
-* **Layer 6: UI** (`ui/tui.py`): The terminal frontend interface.
+AshiChat requires inbound UDP traffic on port `9000` (by default) to successfully establish direct peer-to-peer connections and participate in the mesh overlay. 
+
+While AshiChat utilizes simultaneous UDP bursts for hole-punching to traverse NATs, strict local OS firewalls will drop these inbound packets if not explicitly allowed.
+
+### Linux
+
+**Using UFW (Ubuntu/Debian):**
+```bash
+sudo ufw allow 9000/udp
+```
+
+**Using Firewalld (CentOS/RHEL/Fedora):**
+```bash
+sudo firewall-cmd --permanent --add-port=9000/udp
+sudo firewall-cmd --reload
+```
+
+**Using iptables:**
+```bash
+sudo iptables -A INPUT -p udp --dport 9000 -j ACCEPT
+```
+
+### Windows
+
+Open **PowerShell as Administrator** and execute the following to create an inbound allow rule:
+```powershell
+New-NetFirewallRule -DisplayName "AshiChat UDP 9000" -Direction Inbound -LocalPort 9000 -Protocol UDP -Action Allow
+```
+
+---
+
+## Configuration
+
+AshiChat generates a simple `TOML` configuration file located at `~/.ashichat/config.toml`.
+
+Example structure:
+```toml
+[network]
+udp_port = 9000
+max_peers = 500
+overlay_k = 50
+
+[storage]
+message_log_limit_mb = 100
+max_log_rotations = 3
+
+[debug]
+log_level = "INFO"
+```
+*Note: Debug logs are written to `~/.ashichat/debug.log` and are never output to the console to preserve the TUI state.*
 
 ## System Limitations (By Design)
 
-AshiChat prioritizes decentralization and explicit engineering tradeoffs over guaranteed global reachability.
-- **No Global Reachability:** If you and your friends are completely partitioned from the rest of the mesh, you cannot talk.
-- **No Offline Inbox:** If a peer is offline, you hold the message until they return. There is no cloud server to hold it for them.
-- **Mobile Hostile:** Designed for always-on terminals/VPS/desktops, not mobile phones with aggressive background killing.
-- **Symmetric NAT Constraints:** If all peers are behind symmetric NAT without successful hole punching, manual invite reconnection is required.
+* If all connected nodes are entirely partitioned from the rest of the mesh, global reachability is impossible.
+* There is no cloud inbox. If a recipient is offline, the sender's node queues the encrypted message locally and retries via an exponential backoff engine (up to 7 days).
+* The protocol is designed for always-on terminals, VPS, or desktop environments, and is hostile to mobile OS background execution limits.
+* If both peers are behind symmetric NATs and UDP hole punching fails, a manual invite reconnection is required.
 
-## Testing
+## Development & Testing
 
-A robust suite of tests (incorporating positive, negative, and chaos resilience tests) are included. Core networking, crypto, and logic are fully UI-agnostic and testable headlessly. Test with pytest:
+AshiChat is strictly modular to separate UI, networking, and cryptography components.
 
+### Project Layout
+```text
+ashichat/
+├── src/ashichat/
+│   ├── crypto.py, identity.py        # Layer 1
+│   ├── packet.py                     # Layer 2
+│   ├── handshake.py, session.py      # Layer 3
+│   ├── transport_udp.py, nat.py      # Layer 4
+│   ├── node.py, overlay.py           # Layer 5
+│   └── ui/tui.py                     # Layer 6
+├── tests/                            # Pytest suite
+└── main.py
+```
+
+### Running Tests
+A robust test suite verifying cryptographic equality, storage atomicity, loop prevention, and network parsing is included.
 ```bash
 pytest tests/
+```
