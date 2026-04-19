@@ -51,12 +51,15 @@ class ResolutionManager:
         self._pending: dict[bytes, asyncio.Future] = {}
 
     async def resolve_peer(
-        self, target_peer_id: bytes
+        self,
+        target_peer_id: bytes,
+        *,
+        force_network: bool = False,
     ) -> tuple[str, int] | None:
         """Initiate resolution for a peer.  Returns endpoint or None."""
         # 1. Check local
         ep = self._get_endpoint(target_peer_id)
-        if ep is not None:
+        if ep is not None and not force_network:
             return ep
 
         # 2. Send RESOLVE_REQUEST to overlay
@@ -145,6 +148,7 @@ class ResolutionManager:
                 update.peer_id,
                 (update.endpoint_ip, update.endpoint_port),
                 update.version_counter,
+                update.signature,
             )
 
         # 3. Complete pending resolution
