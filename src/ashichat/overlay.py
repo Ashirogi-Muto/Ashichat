@@ -33,6 +33,7 @@ class PeerEntry:
     last_seen: float = field(default_factory=time.time)
     version_counter: int = 0
     nickname: str | None = None
+    endpoint_signature: bytes | None = None
 
 
 class PeerTable:

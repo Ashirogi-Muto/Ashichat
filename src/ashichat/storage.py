@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ashichat.logging_setup import get_logger
 
@@ -33,6 +34,7 @@ class PeerRecord:
     version_counter: int
     last_seen: float | None
     nickname: str | None
+    endpoint_signature: bytes | None = None
     archived: bool = False
 
 
@@ -44,6 +46,8 @@ class QueueRecord:
     retry_count: int
     created_at: float
     updated_at: float
+    plaintext: bytes = b""
+    sequence_number: int | None = None
 
 
 @dataclass
@@ -67,7 +71,8 @@ CREATE TABLE IF NOT EXISTS peers (
     version_counter INTEGER DEFAULT 0,
     last_seen REAL,
     nickname TEXT,
-    archived INTEGER DEFAULT 0
+    archived INTEGER DEFAULT 0,
+    endpoint_signature BLOB
 );
 
 CREATE TABLE IF NOT EXISTS message_queue (
@@ -77,6 +82,8 @@ CREATE TABLE IF NOT EXISTS message_queue (
     retry_count INTEGER DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
+    plaintext BLOB NOT NULL DEFAULT x'',
+    sequence_number INTEGER,
     FOREIGN KEY (receiver) REFERENCES peers(peer_id)
 );
 
@@ -91,6 +98,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     recv_sequence INTEGER DEFAULT 0,
     created_at REAL NOT NULL,
     FOREIGN KEY (peer_id) REFERENCES peers(peer_id)
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
 );
 """
 
@@ -116,6 +128,21 @@ class StorageManager:
         if "archived" not in cols:
             await self._db.execute(
                 "ALTER TABLE peers ADD COLUMN archived INTEGER DEFAULT 0"
+            )
+        if "endpoint_signature" not in cols:
+            await self._db.execute(
+                "ALTER TABLE peers ADD COLUMN endpoint_signature BLOB"
+            )
+        # Migration: add plaintext column to message_queue if missing
+        async with self._db.execute("PRAGMA table_info(message_queue)") as cur2:
+            mq_cols = [row[1] async for row in cur2]
+        if "plaintext" not in mq_cols:
+            await self._db.execute(
+                "ALTER TABLE message_queue ADD COLUMN plaintext BLOB NOT NULL DEFAULT x''"
+            )
+        if "sequence_number" not in mq_cols:
+            await self._db.execute(
+                "ALTER TABLE message_queue ADD COLUMN sequence_number INTEGER"
             )
         await self._db.commit()
         log.info("Storage initialized at %s", db_path)
@@ -159,7 +186,11 @@ class StorageManager:
             return [_row_to_peer(r) async for r in cur]
 
     async def update_endpoint(
-        self, peer_id: bytes, endpoint: str, version_counter: int
+        self,
+        peer_id: bytes,
+        endpoint: str,
+        version_counter: int,
+        signature: bytes | None = None,
     ) -> bool:
         """Update endpoint only if version_counter > stored version."""
         async with self._db.execute(
@@ -170,12 +201,28 @@ class StorageManager:
                 return False  # stale
 
         await self._db.execute(
-            "UPDATE peers SET last_known_endpoint = ?, version_counter = ?, last_seen = ? "
+            "UPDATE peers SET last_known_endpoint = ?, version_counter = ?, last_seen = ?, "
+            "endpoint_signature = COALESCE(?, endpoint_signature) "
             "WHERE peer_id = ?",
-            (endpoint, version_counter, time.time(), peer_id),
+            (endpoint, version_counter, time.time(), signature, peer_id),
         )
         await self._db.commit()
         return True
+
+    async def get_local_endpoint_version(self) -> int:
+        async with self._db.execute(
+            "SELECT value FROM meta WHERE key = 'local_endpoint_version'"
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def set_local_endpoint_version(self, version: int) -> None:
+        await self._db.execute(
+            "INSERT INTO meta (key, value) VALUES ('local_endpoint_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (version,),
+        )
+        await self._db.commit()
 
     async def remember_endpoint(
         self,
@@ -219,12 +266,14 @@ class StorageManager:
     # -- Queue operations ----------------------------------------------------
 
     async def enqueue_message(
-        self, message_id: str, receiver: bytes, created_at: float
+        self, message_id: str, receiver: bytes, created_at: float,
+        plaintext: bytes = b"",
     ) -> None:
         await self._db.execute(
-            "INSERT INTO message_queue (message_id, receiver, status, retry_count, created_at, updated_at) "
-            "VALUES (?, ?, 'queued', 0, ?, ?)",
-            (message_id, receiver, created_at, created_at),
+            "INSERT INTO message_queue "
+            "(message_id, receiver, status, retry_count, created_at, updated_at, plaintext, sequence_number) "
+            "VALUES (?, ?, 'queued', 0, ?, ?, ?, NULL)",
+            (message_id, receiver, created_at, created_at, plaintext),
         )
         await self._db.commit()
 
@@ -243,6 +292,25 @@ class StorageManager:
         ) as cur:
             return [_row_to_queue(r) async for r in cur]
 
+    async def load_all_queued_messages(self) -> list[QueueRecord]:
+        """Load message records needed for retry and sync after restart."""
+        async with self._db.execute(
+            "SELECT * FROM message_queue WHERE status IN ('queued', 'pending', 'delivered', 'acknowledged') "
+            "ORDER BY created_at",
+        ) as cur:
+            return [_row_to_queue(r) async for r in cur]
+
+    async def update_message_sequence(
+        self,
+        message_id: str,
+        sequence_number: int,
+    ) -> None:
+        await self._db.execute(
+            "UPDATE message_queue SET sequence_number = ?, updated_at = ? WHERE message_id = ?",
+            (sequence_number, time.time(), message_id),
+        )
+        await self._db.commit()
+
     async def increment_retry(self, message_id: str) -> int:
         await self._db.execute(
             "UPDATE message_queue SET retry_count = retry_count + 1, updated_at = ? "
@@ -256,6 +324,13 @@ class StorageManager:
         ) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
+
+    async def clear_message_plaintext(self, message_id: str) -> None:
+        await self._db.execute(
+            "UPDATE message_queue SET plaintext = x'' WHERE message_id = ?",
+            (message_id,),
+        )
+        await self._db.commit()
 
     # -- Session persistence -------------------------------------------------
 
@@ -295,6 +370,11 @@ class StorageManager:
         )
         await self._db.commit()
 
+    async def load_all_sessions(self) -> list[SessionRecord]:
+        """Load all persisted session records (for startup sequence restore)."""
+        async with self._db.execute("SELECT * FROM sessions") as cur:
+            return [_row_to_session(r) async for r in cur]
+
 
 # ---------------------------------------------------------------------------
 # Message log (encrypted, append-only, per-peer)
@@ -315,30 +395,44 @@ class MessageLog:
         return self._dir / f"{peer_id.hex()}.log"
 
     async def append_message(self, peer_id: bytes, encrypted_blob: bytes) -> None:
-        """Crash-safe append: write to tmp, fsync, then rename/append."""
+        """Crash-safe append using atomic write process.
+
+        Follows the spec's required sequence:
+        1. Build the entry line.
+        2. Write to temp file.
+        3. ``fsync`` the temp file.
+        4. Atomic ``os.rename()`` temp → main log.
+
+        Because the log is append-only and we cannot ``rename`` over an
+        existing file without losing prior entries, we read the current log
+        content, append the new entry, write the full result to a temp file,
+        fsync, and then atomically replace the main log via ``os.rename``.
+        This ensures the main log is never left in a half-written state.
+        """
         log_path = self._log_path(peer_id)
         tmp_path = log_path.with_suffix(".log.tmp")
 
-        # Build line: length-prefixed blob + newline
+        # Build length-prefixed line
         import struct
 
         line = struct.pack(">I", len(encrypted_blob)) + encrypted_blob + b"\n"
 
-        # Write to temp
-        with open(tmp_path, "ab") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+        # Read existing content (empty if file doesn't exist yet)
+        existing = b""
+        if log_path.exists():
+            with open(log_path, "rb") as f:
+                existing = f.read()
 
-        # Append temp contents to main log
-        with open(log_path, "ab") as main:
-            with open(tmp_path, "rb") as tmp:
-                main.write(tmp.read())
-            main.flush()
-            os.fsync(main.fileno())
+        # Write existing + new entry to temp
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, existing + line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
-        # Remove temp
-        tmp_path.unlink(missing_ok=True)
+        # Atomic rename: temp → main log
+        os.rename(str(tmp_path), str(log_path))
 
         # Check rotation
         await self.rotate_if_needed(peer_id)
@@ -389,6 +483,59 @@ class MessageLog:
             log_path.rename(log_path.with_suffix(".log.1"))
 
 
+class OutboxStore:
+    """Encrypted outbound message spool.
+
+    Keeps message bodies out of SQLite while preserving restart-safe retries.
+    Each message is stored in its own encrypted file addressed by message_id.
+    """
+
+    def __init__(self, outbox_dir: Path, key: bytes) -> None:
+        self._dir = outbox_dir
+        self._key = key
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, message_id: str) -> Path:
+        return self._dir / f"{message_id}.bin"
+
+    async def store_message(self, message_id: str, plaintext: bytes) -> None:
+        nonce = os.urandom(12)
+        blob = nonce + AESGCM(self._key).encrypt(nonce, plaintext, message_id.encode("utf-8"))
+        tmp_path = self._path(message_id).with_suffix(".bin.tmp")
+        final_path = self._path(message_id)
+
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, blob)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        os.replace(str(tmp_path), str(final_path))
+
+    async def load_message(self, message_id: str) -> bytes | None:
+        path = self._path(message_id)
+        if not path.exists():
+            return None
+
+        blob = path.read_bytes()
+        if len(blob) < 12:
+            return None
+        nonce = blob[:12]
+        ciphertext = blob[12:]
+        try:
+            return AESGCM(self._key).decrypt(
+                nonce,
+                ciphertext,
+                message_id.encode("utf-8"),
+            )
+        except Exception:
+            return None
+
+    async def delete_message(self, message_id: str) -> None:
+        self._path(message_id).unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Row conversions
 # ---------------------------------------------------------------------------
@@ -401,6 +548,7 @@ def _row_to_peer(row: Any) -> PeerRecord:
         version_counter=row[3],
         last_seen=row[4],
         nickname=row[5],
+        endpoint_signature=row[7] if len(row) > 7 and row[7] else None,
         archived=bool(row[6]) if len(row) > 6 else False,
     )
 
@@ -422,6 +570,8 @@ def _row_to_queue(row: Any) -> QueueRecord:
         retry_count=row[3],
         created_at=row[4],
         updated_at=row[5],
+        plaintext=row[6] if len(row) > 6 and row[6] else b"",
+        sequence_number=row[7] if len(row) > 7 and row[7] is not None else None,
     )
 
 

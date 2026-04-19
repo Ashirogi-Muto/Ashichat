@@ -59,11 +59,34 @@ class Session:
             self.send_sequence += 1
             return seq
 
+    def check_recv_sequence(self, seq: int) -> bool:
+        """Return ``True`` if *seq* > ``recv_sequence`` (reject replays).
+
+        This is a **read-only** check — it does NOT advance the counter.
+        Call :meth:`advance_recv_sequence` after successful decryption.
+        """
+        return seq > self.recv_sequence
+
+    def advance_recv_sequence(self, seq: int) -> None:
+        """Advance ``recv_sequence`` to *seq*.
+
+        Must only be called **after** the corresponding DATA packet has been
+        successfully decrypted, to prevent a bad ciphertext from poisoning
+        the session state.
+        """
+        with self._seq_lock:
+            if seq > self.recv_sequence:
+                self.recv_sequence = seq
+
     def validate_recv_sequence(self, seq: int) -> bool:
-        """Return ``True`` if *seq* > ``recv_sequence`` (reject replays)."""
-        if seq <= self.recv_sequence:
+        """Check-and-advance helper (legacy convenience).
+
+        .. deprecated:: Prefer :meth:`check_recv_sequence` +
+           :meth:`advance_recv_sequence` for safe two-phase handling.
+        """
+        if not self.check_recv_sequence(seq):
             return False
-        self.recv_sequence = seq
+        self.advance_recv_sequence(seq)
         return True
 
 
