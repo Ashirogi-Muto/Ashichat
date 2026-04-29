@@ -14,7 +14,7 @@ Unlike Signal or Telegram, AshiChat has **zero central servers**. There is no "p
 ## Key Features
 
 ### 🔐 Identity & Security
--   **Identity:** Users are identified by **Ed25519 public keys**, not phone numbers or IPs.
+-   **Identity:** Users have a single **Root Identity**, with individual devices holding distinct **Device Keys** signed by the root. Users are identified by public keys, not phone numbers or IPs.
 -   **Encryption:** All messages are **E2E encrypted** (AES-256-GCM) with Perfect Forward Secrecy (session keys rotate on reconnect).
 -   **Mutual Auth:** Strict mutual authentication. No Trust-On-First-Use (TOFU). You must know a peer's key to talk to them.
 -   **Metadata Privacy:** Packet headers are minimized. Traffic analysis is mitigated by the P2P mesh structure.
@@ -32,6 +32,7 @@ Unlike Signal or Telegram, AshiChat has **zero central servers**. There is no "p
     -   **Encrypted Logs:** Message content is plain-file appended (encrypted at rest).
 -   **Crash Safety:** Atomic writes ensure data integrity even if the power fails.
 -   **Offline Queue:** Messages are queued and retried automatically when a peer comes online (up to 7 days).
+-   **Multi-Device Sync:** Devices belonging to the same user automatically discover each other and seamlessly sync chat history and queues using P2P log replication.
 
 ### 🖥️ User Experience
 -   **Interface:** A rich **Terminal User Interface (TUI)** built with `Textual`. Mouse support, scrolling, and status indicators.
@@ -62,5 +63,5 @@ Unlike Signal or Telegram, AshiChat has **zero central servers**. There is no "p
 -   **Mobile Hostile:** Designed for always-on terminals/VPS/desktops, not mobile phones with aggressive background killing.
 
 ## Project Status
--   **Current State:** Requirements Hardened.
+-   **Current State:** Requirements Hardened. Detailed protocol specifications are located in the `docs/` directory.
 -   **Next Step:** Implementation Phase 0 (Bootstrap).

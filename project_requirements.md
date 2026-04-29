@@ -7,6 +7,8 @@ AshiChat is a decentralized, invite-only, identity-based, peer-to-peer encrypted
 
 The system is built in Python for the initial implementation and is structured modularly to allow future extension. It must remain lightweight and avoid heavy dependencies such as bundled Tor or embedded databases beyond SQLite.
 
+**Note:** For the comprehensive and highly detailed protocol specifications, including byte-level framing, please refer to the `docs/` directory.
+
 The core philosophy of AshiChat is:
 
 - No unsolicited messaging
@@ -28,19 +30,20 @@ Backward compatibility is not guaranteed in v1. Future versions must increment t
 
 ## 2. Identity Model
 
-Each device generates a long-term Ed25519 keypair upon first launch.
+Identity is divided into **Master Identity** and **Device Identity**:
 
-The public key uniquely defines device identity. **Peer ID = SHA-256(public_key).** Identity is not IP-based and not tied to network address. The fingerprint is derived via SHA-256 of the public key and displayed in shortened human-readable form.
+1.  **Master Identity (Root):** Generated from a mnemonic seed phrase. The `Root Public Key` uniquely defines the user. **Peer ID = SHA-256(root_public_key)**.
+2.  **Device Identity:** Each device generates its own local Ed25519 keypair. The `Device Public Key` is signed by the Master Identity.
+
+When a peer sends a message to a `Peer ID`, the overlay routes the message to any active device that can prove its device key is signed by the `Root Public Key`.
 
 Identity files are stored locally under:
 
 `~/.ashichat/identity/`
 
-Identity is persistent and **immutable for v1**.
+Identity is persistent. **Device rotation is supported** (you can provision a new device with the Master Identity), but the Root Identity is immutable.
 
-- **Identity rotation is NOT supported.** If identity is lost, the peer is treated as a new entity.
-
-All peer recognition and verification is cryptographic and based on key ownership.
+All peer recognition and verification is cryptographic and based on root key ownership. Devices belonging to the same Root Identity are implicitly trusted and sync with each other.
 
 ## 3. Invite-Based Trust Model
 
@@ -506,22 +509,20 @@ Resolution is probabilistic and eventually consistent.
 
 ## 11. Chat Synchronization
 
-On reconnect:
+On reconnect between two distinct peers (e.g., Alice and Bob):
 
 Nodes exchange:
 
 `I_HAVE_UP_TO(sequence_number)`
 
-Missing encrypted messages are transmitted.
+Missing encrypted messages are transmitted. Each sender maintains independent sequence counter. Conflict-free because messages are append-only per sender. If local message log deleted: Peer resends entire missing history. Encrypted blobs are canonical source of truth.
 
-Each sender maintains independent sequence counter.
+### 11.1. Multi-Device Sync
 
-Conflict-free because messages are append-only per sender.
-
-If local message log deleted:
-Peer resends entire missing history.
-
-Encrypted blobs are canonical source of truth.
+Devices sharing the same **Master Identity** automatically discover each other over the overlay network using their shared `Peer ID`.
+- Upon connection, devices verify their mutual Master Identity signatures.
+- They execute the standard `I_HAVE_UP_TO` synchronization for **all** peer message logs.
+- Because AshiChat message logs are append-only and cryptographically tied to sequence numbers, devices seamlessly converge on the same unified chat history and offline queue state without needing a central server.
 
 ## 12. Automatic Startup Behavior
 
